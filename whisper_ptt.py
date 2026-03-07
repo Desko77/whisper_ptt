@@ -10,6 +10,7 @@ Optional: Ollama for LLM cleanup.
 
 import io
 import os
+import platform
 import wave
 import time
 import threading
@@ -29,7 +30,7 @@ try:
 except ImportError:
     if os.path.isfile(_env_path):
         print()
-        print("  ⚠️  NOTE: You have a .env file but python-dotenv is not installed, so it is not loaded.")
+        print("  ❌  NOTE: You have a .env file but python-dotenv is not installed, so it is not loaded.")
         print("      Config comes from environment variables only.")
         print("      To use .env, run:  pip install python-dotenv")
         print()
@@ -64,8 +65,9 @@ WHISPER_COMPUTE_TYPE = _env("WHISPER_COMPUTE_TYPE", "float16")
 WHISPER_LANGUAGE = _env("WHISPER_LANGUAGE", "en")
 WHISPER_INITIAL_PROMPT = _env("WHISPER_INITIAL_PROMPT", "English speech.")
 
-# Hotkey (hold to record, release to stop)
-HOTKEY = _env("HOTKEY", "pause")
+# Hotkey (hold to record, release to stop). Default: right ctrl (Windows/Linux), right cmd (macOS)
+_default_hotkey = "right cmd" if platform.system() == "Darwin" else "right ctrl"
+HOTKEY = _env("HOTKEY", _default_hotkey)
 
 # LLM cleanup (Ollama)
 USE_LLM_CLEANUP = _env("USE_LLM_CLEANUP", "true", type_=bool)
@@ -238,7 +240,7 @@ def cleanup_with_llm(raw_text, detected_lang):
         print(f"✨ LLM ({time.time() - t0:.1f}s): {result}")
         return result
     except Exception as e:
-        print(f"⚠️ LLM error: {e}, using raw text")
+        print(f"❌ LLM error: {e}, using raw text")
         return raw_text
 
 
@@ -249,7 +251,7 @@ def cleanup_with_llm(raw_text, detected_lang):
 def paste_to_front(text):
     """Copy to clipboard and/or paste to active window (Ctrl+V). If KEYS_AFTER_PASTE set, send that key(s) after paste."""
     if not text.strip():
-        print("⚠️ Empty text, skipping")
+        print("❌ Empty text, skipping")
         return
     if not COPY_TO_CLIPBOARD and not PASTE_TO_ACTIVE_WINDOW:
         print("✅ Done (console only)")
@@ -298,7 +300,7 @@ def stop_recording_and_process():
     print(f"⏹️ Recorded {duration_sec:.1f}s (with {PREBUFFER_SEC}s prebuffer)")
 
     if len(frames) < MIN_FRAMES:
-        print("⚠️ Recording too short")
+        print("❌ Recording too short")
         return
 
     threading.Thread(target=_process_recorded_frames, args=(frames,), daemon=True).start()
@@ -318,7 +320,7 @@ def _on_hotkey_release(_event=None):
 
 
 def _format_banner():
-    w = 75
+    w = 70
     def line(s, width=None):
         width = width or w
         padded = (s + " " * width)[:width]
@@ -327,7 +329,7 @@ def _format_banner():
         "╔" + "═" * w + "╗\n",
         line("     🎤 Whisper-PTT ready!", w - 1) + "\n",
         line("") + "\n",
-        line(f'     Hotkey: "{HOTKEY.upper()}" (hold to record, release to stop and transcribe)') + "\n",
+        line(f'     Hotkey: "{HOTKEY.upper()}" (hold to record, release to transcribe)') + "\n",
         line(f"     LLM cleanup: {'ON' if USE_LLM_CLEANUP else 'OFF'}") + "\n",
         line(f"     Copy to clipboard: {'ON' if COPY_TO_CLIPBOARD else 'OFF'}") + "\n",
         line(f"     Paste to active window: {'ON' if PASTE_TO_ACTIVE_WINDOW else 'OFF'}") + "\n",

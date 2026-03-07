@@ -57,7 +57,7 @@ Edit `.env` as needed. Main knobs:
 | `WHISPER_PTT_WHISPER_MODEL` | Whisper model (`base`, `small`, `medium`, `large-v3`, `large-v3-turbo`) | `large-v3` |
 | `WHISPER_PTT_WHISPER_DEVICE` | Whisper device: `cuda` or `cpu` | `cuda` |
 | `WHISPER_PTT_WHISPER_LANGUAGE` | Whisper language (`en`, `ru`, …) | `en` |
-| `WHISPER_PTT_HOTKEY` | Hotkey (`pause`, `f9`, `f10`, `scroll lock`, …) | `pause` |
+| `WHISPER_PTT_HOTKEY` | Hotkey (`right ctrl`, `right cmd`, `pause`, `f9`, …) | `right ctrl` (Win/Linux), `right cmd` (macOS) |
 | `WHISPER_PTT_USE_LLM_CLEANUP` | LLM cleanup | `true` (off: `false`, `0`, `no`, `off`) |
 | `WHISPER_PTT_OLLAMA_MODEL` | Ollama model (for LLM cleanup) | `gemma3:12b` |
 | `WHISPER_PTT_COPY_TO_CLIPBOARD` | Copy to clipboard | `true` (same on/off values as above) |
@@ -91,7 +91,7 @@ First run may download the Whisper model (size depends on the model you chose). 
 
 **5. Use**
 
-Hold **Pause** (or your hotkey) → speak → release. Text is pasted into the active window (and Enter is sent if enabled). Exit with **Esc** or Ctrl+C.
+Hold **right ctrl** (Windows/Linux) or **right cmd** (macOS) — or your hotkey — → speak → release. Text is pasted into the active window (and Enter is sent if enabled). Exit with **Esc** or Ctrl+C.
 
 > Run Whisper-PTT in a separate terminal (or keep it in the background). If the terminal stays in focus, the key-release event may not be handled correctly.
 
