@@ -10,6 +10,12 @@ Voice-to-text tools shouldn't require blind trust. **Whisper-PTT** is a **single
 
 The pipeline: hold the hotkey, speak, release. Whisper transcribes locally; an optional second pass through an LLM cleans the result before it's pasted into the focused window. Everything is configurable via environment variables: Whisper model, hotkey, LLM model, cleanup prompt, paste vs clipboard-only, or turn off LLM entirely. A prebuffer captures the start of your speech so the first word isn't clipped. One Python file, a handful of dependencies — no build step, no daemon, no config files you didn't ask for.
 
+**Why not on PyPI?**
+
+> *Whisper-PTT is intentionally not on PyPI. The point is that you can read the entire source before running it. `pip install` would undermine that.*
+
+Clone → open → read → run: you can audit the code in a few minutes. Publishing to PyPI would scatter files into `site-packages` and add a layer of abstraction between you and the code — the opposite of "one file, zero blind trust." Same philosophy as other single-file, audit-friendly tools: you see what you run.
+
 ---
 
 ## Quick start
