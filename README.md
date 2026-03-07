@@ -93,8 +93,6 @@ First run may download the Whisper model (size depends on the model you chose). 
 
 Default hotkey: **ctrl+f12** (Windows/Linux) or **cmd+f12** (macOS). Hold it → speak → release. You can set `WHISPER_PTT_HOTKEY=pause` in `.env` for a single-key option if your keyboard has a Pause key. Text is pasted into the active window (and Enter is sent if enabled). Exit with **Esc** or Ctrl+C.
 
-> Run Whisper-PTT in a separate terminal (or keep it in the background). If the terminal stays in focus, the key-release event may not be handled correctly.
-
 ---
 
 ## Use cases

@@ -367,8 +367,10 @@ def main():
     print(_format_banner())
     print(f'👂 Listening — hold "{HOTKEY.upper()}" to start recording.')
 
-    keyboard.on_press_key(HOTKEY_KEY, _on_hotkey_press)
-    keyboard.on_release_key(HOTKEY_KEY, _on_hotkey_release)
+    # When hotkey is Pause, suppress it so the terminal doesn't freeze (Pause normally pauses terminal output)
+    _suppress_pause = (HOTKEY_KEY == "pause")
+    keyboard.on_press_key(HOTKEY_KEY, _on_hotkey_press, suppress=_suppress_pause)
+    keyboard.on_release_key(HOTKEY_KEY, _on_hotkey_release, suppress=_suppress_pause)
 
     keyboard.wait("esc")
 
