@@ -2,9 +2,9 @@
 
 # 🎙 Whisper-PTT
 
-**Local voice-to-text · Push-to-talk · Offline.**
+**Local voice-to-text · Push-to-talk · Offline**
 
-![demo](assets/demo.gif)
+<img src="assets/demo.gif" alt="Whisper-PTT demo" width="800">
 
 </div>
 
