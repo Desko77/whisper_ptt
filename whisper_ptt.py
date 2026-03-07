@@ -20,12 +20,19 @@ import pyperclip
 import requests
 from faster_whisper import WhisperModel
 
-# Load .env if python-dotenv is available
+# Load .env from script directory (so it works regardless of CWD)
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_env_path = os.path.join(_script_dir, ".env")
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(_env_path)
 except ImportError:
-    pass
+    if os.path.isfile(_env_path):
+        print()
+        print("  ⚠️  NOTE: You have a .env file but python-dotenv is not installed, so it is not loaded.")
+        print("      Config comes from environment variables only.")
+        print("      To use .env, run:  pip install python-dotenv")
+        print()
 
 
 def _env(key, default, *, type_=str):
@@ -33,7 +40,12 @@ def _env(key, default, *, type_=str):
     full_key = key if key.startswith("WHISPER_PTT_") else f"WHISPER_PTT_{key}"
     raw = os.environ.get(full_key, os.environ.get(key, default))
     if type_ is bool:
-        return str(raw).lower() in ("1", "true", "yes", "on")
+        s = str(raw).strip().lower()
+        if s in ("1", "true", "yes", "on"):
+            return True
+        if s in ("0", "false", "no", "off", ""):
+            return False
+        return False  # any other value → off
     if type_ is int:
         return int(raw)
     if type_ is float:
