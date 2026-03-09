@@ -63,8 +63,8 @@ WHISPER_MODEL = _env("WHISPER_MODEL", "large-v3")
 WHISPER_LANGUAGE = _env("WHISPER_LANGUAGE", "en")
 WHISPER_INITIAL_PROMPT = _env("WHISPER_INITIAL_PROMPT", "English speech.")
 
-# Hotkey (hold to record, release to stop). Default: ctrl
-HOTKEY = _env("HOTKEY", "ctrl").strip().lower().replace(" ", "")
+# Hotkey (hold to record, release to stop). Default: alt
+HOTKEY = _env("HOTKEY", "alt").strip().lower().replace(" ", "")
 # Parse combo (e.g. "ctrl+f12" -> ("ctrl", "f12")) for hook; single key -> (None, hotkey)
 if "+" in HOTKEY:
     _parts = HOTKEY.split("+", 1)

@@ -65,10 +65,10 @@ python -m venv venv
 source venv/bin/activate
 pip install -r requirements-apple-silicon.txt
 cp .env.example-apple-silicon .env   # edit as needed
-sudo python whisper_ptt_apple_silicon.py
+python whisper_ptt_apple_silicon.py
 ```
 
-`sudo` is required because the `keyboard` library needs root to listen for global hotkeys on macOS. The first run downloads the Whisper model from HuggingFace (mlx-community). Inference runs on Metal — no CUDA needed.
+On first run, macOS will prompt for **Accessibility** and **Input Monitoring** permissions for your terminal app so it can listen for global hotkeys and send paste keystrokes. Grant those, and run **without** `sudo`. The first run downloads the Whisper model from HuggingFace (mlx-community). Inference runs on Metal — no CUDA needed.
 
 ### (Optional) Ollama for LLM cleanup
 
@@ -96,7 +96,7 @@ cp .env.example-apple-silicon .env         # macOS Apple Silicon
 |----------|--------------|---------|
 | `WHISPER_PTT_WHISPER_MODEL` | Whisper model (`tiny`, `base`, `small`, `medium`, `large-v3`, `large-v3-turbo`) | `large-v3` (CUDA), `large-v3-turbo` (Apple Silicon) |
 | `WHISPER_PTT_WHISPER_LANGUAGE` | Whisper language code (`en`, `ru`, `de`, `fr`, …) | `en` |
-| `WHISPER_PTT_HOTKEY` | Hotkey (hold to record). Combos like `ctrl+f12` also work. | `ctrl` (CUDA), `cmd` (Apple Silicon) |
+| `WHISPER_PTT_HOTKEY` | Hotkey (hold to record). Combos like `alt+f12` also work. | `alt` (CUDA), `option` (Apple Silicon) |
 | `WHISPER_PTT_USE_LLM_CLEANUP` | LLM cleanup on/off | `true` |
 | `WHISPER_PTT_OLLAMA_MODEL` | Ollama model for cleanup | `gemma3:12b` |
 | `WHISPER_PTT_COPY_TO_CLIPBOARD` | Copy result to clipboard | `true` |
@@ -124,7 +124,7 @@ cp .env.example-apple-silicon .env         # macOS Apple Silicon
 
 ## Usage
 
-Default hotkey: **Ctrl** (Windows/Linux) or **Cmd** (macOS). Hold → speak → release. Text is pasted into the active window (and Enter is sent if configured). Exit with **Esc** or Ctrl+C.
+Default hotkey: **Alt** (Windows/Linux) or **Option** (macOS). Hold → speak → release. Text is pasted into the active window (and Enter is sent if configured). Exit with **Esc** or Ctrl+C.
 
 ### Use cases
 

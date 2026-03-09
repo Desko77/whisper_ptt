@@ -62,8 +62,8 @@ WHISPER_MODEL = _env("WHISPER_MODEL", "large-v3-turbo")
 WHISPER_LANGUAGE = _env("WHISPER_LANGUAGE", "en")
 WHISPER_INITIAL_PROMPT = _env("WHISPER_INITIAL_PROMPT", "English speech.")
 
-# Hotkey (hold to record, release to stop). Default: cmd
-HOTKEY = _env("HOTKEY", "cmd").strip().lower().replace(" ", "")
+# Hotkey (hold to record, release to stop). Default: option
+HOTKEY = _env("HOTKEY", "option").strip().lower().replace(" ", "")
 if "+" in HOTKEY:
     _parts = HOTKEY.split("+", 1)
     HOTKEY_MODIFIER, HOTKEY_KEY = _parts[0].strip(), _parts[1].strip()
