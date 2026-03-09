@@ -287,40 +287,38 @@ def transform_with_llm(raw_text, detected_lang):
 # Output: clipboard and/or paste to active window
 # -----------------------------------------------------------------------------
 
-def _applescript_keystroke(key, modifier="command"):
-    """Send a keystroke via AppleScript (works reliably from any thread on macOS)."""
-    modifiers = {
-        "command": "command down",
-        "control": "control down",
-        "option": "option down",
-        "shift": "shift down",
-    }
-    using = modifiers.get(modifier)
-    if using:
-        script = f'tell application "System Events" to keystroke "{key}" using {{{using}}}'
-    else:
-        script = f'tell application "System Events" to keystroke "{key}"'
-    subprocess.run(["osascript", "-e", script], check=False)
+_KEY_CODES = {
+    "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7,
+    "c": 8, "v": 9, "b": 11, "q": 12, "w": 13, "e": 14, "r": 15,
+    "y": 16, "t": 17, "1": 18, "2": 19, "3": 20, "4": 21, "6": 22,
+    "5": 23, "9": 25, "7": 26, "8": 28, "0": 29, "o": 31, "u": 32,
+    "i": 34, "p": 35, "l": 37, "j": 38, "k": 40, "n": 45, "m": 46,
+    "enter": 36, "return": 36, "tab": 48, "space": 49, "delete": 51,
+    "escape": 53,
+}
+
+_MODIFIERS = {
+    "command": "command down",
+    "control": "control down",
+    "option": "option down",
+    "shift": "shift down",
+}
 
 
-def _applescript_key_code(key_name):
-    """Send a special key (return, tab, etc.) via AppleScript key code."""
-    key_codes = {
-        "enter": 36, "return": 36,
-        "tab": 48,
-        "escape": 53,
-        "space": 49,
-        "delete": 51,
-    }
-    code = key_codes.get(key_name)
+def _applescript_key_code(key_name, modifier=None):
+    """Send a key via AppleScript key code (layout-independent)."""
+    code = _KEY_CODES.get(key_name.lower())
+    using = _MODIFIERS.get(modifier) if modifier else None
     if code is not None:
-        script = f'tell application "System Events" to key code {code}'
-        subprocess.run(["osascript", "-e", script], check=False)
+        if using:
+            script = f'tell application "System Events" to key code {code} using {{{using}}}'
+        else:
+            script = f'tell application "System Events" to key code {code}'
+    elif using:
+        script = f'tell application "System Events" to keystroke "{key_name}" using {{{using}}}'
     else:
-        subprocess.run(
-            ["osascript", "-e", f'tell application "System Events" to keystroke "{key_name}"'],
-            check=False,
-        )
+        script = f'tell application "System Events" to keystroke "{key_name}"'
+    subprocess.run(["osascript", "-e", script], check=False)
 
 
 def _send_keys_after_paste():
@@ -332,21 +330,7 @@ def _send_keys_after_paste():
         _applescript_key_code(parts[0])
     else:
         modifier = parts[0].replace("ctrl", "control").replace("cmd", "command")
-        key = parts[1]
-        key_codes = {"enter": 36, "return": 36, "tab": 48}
-        code = key_codes.get(key)
-        modifiers_map = {
-            "command": "command down",
-            "control": "control down",
-            "option": "option down",
-            "shift": "shift down",
-        }
-        using = modifiers_map.get(modifier, "command down")
-        if code is not None:
-            script = f'tell application "System Events" to key code {code} using {{{using}}}'
-        else:
-            script = f'tell application "System Events" to keystroke "{key}" using {{{using}}}'
-        subprocess.run(["osascript", "-e", script], check=False)
+        _applescript_key_code(parts[1], modifier=modifier)
 
 
 def paste_to_front(text):
@@ -362,7 +346,7 @@ def paste_to_front(text):
     if COPY_TO_CLIPBOARD:
         print("📋 Copied to clipboard!")
     if PASTE_TO_ACTIVE_WINDOW:
-        _applescript_keystroke("v", "command")
+        _applescript_key_code("v", modifier="command")
         time.sleep(0.1)
         if KEYS_AFTER_PASTE:
             time.sleep(0.05)
