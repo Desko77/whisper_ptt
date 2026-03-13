@@ -1,6 +1,6 @@
 # Whisper-PTT
 
-Local push-to-talk voice-to-text using Whisper. Fully offline — nothing leaves your machine.
+Stupidly Simple Local Push-to-Talk Voice-to-Text You Can Review Over a Coffee. Powered by Whisper. Fully offline — nothing leaves your machine.
 
 Hold a hotkey, speak, release. Transcribed text is pasted into the active window (or copied to clipboard). Optionally, a local LLM (Ollama) can transform the output — fix grammar, reformat as an email, translate, or anything else you can describe in a prompt.
 
@@ -9,6 +9,8 @@ Hold a hotkey, speak, release. Transcribed text is pasted into the active window
 ---
 
 ## Platforms
+
+Single script per platform — so you know exactly what you're running.
 
 GPU acceleration is required — there is no CPU-only mode. One self-contained script per platform:
 
