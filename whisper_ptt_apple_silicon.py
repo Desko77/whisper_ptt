@@ -70,10 +70,17 @@ if "+" in HOTKEY:
 else:
     HOTKEY_MODIFIER, HOTKEY_KEY = None, HOTKEY
 
-# LLM transform (Ollama) — optional, OFF by default
+# LLM transform — optional, OFF by default
 USE_LLM_TRANSFORM = _env("USE_LLM_TRANSFORM", "false", type_=bool)
-OLLAMA_MODEL = _env("OLLAMA_MODEL", "gemma3:12b")
-OLLAMA_URL = _env("OLLAMA_URL", "http://localhost:11434/api/generate")
+# Backend: "ollama" (Ollama native API) or "openai" (OpenAI-compatible: LM Studio, llama.cpp, etc.)
+LLM_BACKEND = _env("LLM_BACKEND", "ollama").strip().lower()
+if LLM_BACKEND not in ("ollama", "openai"):
+    raise SystemExit(f"Invalid config: LLM_BACKEND must be 'ollama' or 'openai' (got {LLM_BACKEND!r}).")
+LLM_MODEL = _env("LLM_MODEL", _env("OLLAMA_MODEL", "gemma3:12b"))
+LLM_URL = _env("LLM_URL", _env("OLLAMA_URL",
+    "http://localhost:11434/api/generate" if LLM_BACKEND == "ollama"
+    else "http://localhost:1234/v1/chat/completions"))
+LLM_API_KEY = _env("LLM_API_KEY", "")
 DEFAULT_LLM_TRANSFORM_PROMPT = """Fix the following speech-to-text transcription. Rules:
 - Fix grammar, punctuation, and capitalization
 - Remove filler words (um, uh, like, etc.)
@@ -257,25 +264,53 @@ def transcribe(audio_np):
     return text, lang
 
 
+def _llm_request_ollama(prompt):
+    """Send request to Ollama native API."""
+    r = requests.post(
+        LLM_URL,
+        json={
+            "model": LLM_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": 0.1, "num_predict": len(prompt) * 2},
+        },
+        timeout=30,
+    )
+    return r.json()["response"].strip()
+
+
+def _llm_request_openai(prompt):
+    """Send request to OpenAI-compatible API (LM Studio, llama.cpp, etc.)."""
+    headers = {"Content-Type": "application/json"}
+    if LLM_API_KEY:
+        headers["Authorization"] = f"Bearer {LLM_API_KEY}"
+    r = requests.post(
+        LLM_URL,
+        headers=headers,
+        json={
+            "model": LLM_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.1,
+            "max_tokens": len(prompt) * 2,
+            "stream": False,
+        },
+        timeout=30,
+    )
+    return r.json()["choices"][0]["message"]["content"].strip()
+
+
 def transform_with_llm(raw_text, detected_lang):
-    """LLM transform: post-process transcription via Ollama."""
+    """LLM transform: post-process transcription via configured backend."""
     if not raw_text.strip():
         return raw_text
-    print("🔄 LLM transform...")
+    print(f"🔄 LLM transform ({LLM_BACKEND})...")
     t0 = time.time()
     prompt = LLM_TRANSFORM_PROMPT.format(detected_lang=detected_lang, raw_text=raw_text)
     try:
-        r = requests.post(
-            OLLAMA_URL,
-            json={
-                "model": OLLAMA_MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "options": {"temperature": 0.1, "num_predict": len(raw_text) * 2},
-            },
-            timeout=30,
-        )
-        result = r.json()["response"].strip()
+        if LLM_BACKEND == "openai":
+            result = _llm_request_openai(prompt)
+        else:
+            result = _llm_request_ollama(prompt)
         print(f"✨ LLM ({time.time() - t0:.1f}s): {result}")
         return result
     except Exception as e:
@@ -511,7 +546,7 @@ def _format_banner():
         line("") + "\n",
         line(f'     Hotkey: "{HOTKEY.upper()}" (hold to record, release to transcribe)') + "\n",
         line(f"     Model: {_mlx_model_path}") + "\n",
-        line(f"     LLM transform: {'ON' if USE_LLM_TRANSFORM else 'OFF'}") + "\n",
+        line(f"     LLM transform: {'ON (' + LLM_BACKEND + ')' if USE_LLM_TRANSFORM else 'OFF'}") + "\n",
         line(f"     Copy to clipboard: {'ON' if COPY_TO_CLIPBOARD else 'OFF'}") + "\n",
         line(f"     Paste to active window: {'ON' if PASTE_TO_ACTIVE_WINDOW else 'OFF'}") + "\n",
     ]

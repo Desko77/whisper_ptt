@@ -73,10 +73,17 @@ if "+" in HOTKEY:
 else:
     HOTKEY_MODIFIER, HOTKEY_KEY = None, HOTKEY
 
-# LLM transform (Ollama) — optional, OFF by default
+# LLM transform — optional, OFF by default
 USE_LLM_TRANSFORM = _env("USE_LLM_TRANSFORM", "false", type_=bool)
-OLLAMA_MODEL = _env("OLLAMA_MODEL", "gemma3:12b")
-OLLAMA_URL = _env("OLLAMA_URL", "http://localhost:11434/api/generate")
+# Backend: "ollama" (Ollama native API) or "openai" (OpenAI-compatible: LM Studio, llama.cpp, etc.)
+LLM_BACKEND = _env("LLM_BACKEND", "ollama").strip().lower()
+if LLM_BACKEND not in ("ollama", "openai"):
+    raise SystemExit(f"Invalid config: LLM_BACKEND must be 'ollama' or 'openai' (got {LLM_BACKEND!r}).")
+LLM_MODEL = _env("LLM_MODEL", _env("OLLAMA_MODEL", "gemma3:12b"))
+LLM_URL = _env("LLM_URL", _env("OLLAMA_URL",
+    "http://localhost:11434/api/generate" if LLM_BACKEND == "ollama"
+    else "http://localhost:1234/v1/chat/completions"))
+LLM_API_KEY = _env("LLM_API_KEY", "")
 DEFAULT_LLM_TRANSFORM_PROMPT = """Fix the following speech-to-text transcription. Rules:
 - Fix grammar, punctuation, and capitalization
 - Remove filler words (um, uh, like, etc.)
@@ -91,6 +98,10 @@ LLM_TRANSFORM_PROMPT = _env("LLM_TRANSFORM_PROMPT", DEFAULT_LLM_TRANSFORM_PROMPT
 # Output: copy to clipboard and/or paste to active window
 COPY_TO_CLIPBOARD = _env("COPY_TO_CLIPBOARD", "true", type_=bool)
 PASTE_TO_ACTIVE_WINDOW = _env("PASTE_TO_ACTIVE_WINDOW", "true", type_=bool)
+# Paste method: sendinput (Windows API) | ctrl+v | ctrl+shift+v (terminals)
+PASTE_METHOD = _env("PASTE_METHOD", "ctrl+v").strip().lower()
+if PASTE_METHOD not in ("ctrl+v", "ctrl+shift+v", "shift+insert"):
+    raise SystemExit(f"Invalid config: PASTE_METHOD must be ctrl+v, ctrl+shift+v, or shift+insert (got {PASTE_METHOD!r}).")
 # Clipboard after paste (only when Paste is on): restore | clear | preserve
 CLIPBOARD_AFTER_PASTE_POLICY = _env("CLIPBOARD_AFTER_PASTE_POLICY", "restore").strip().lower()
 if CLIPBOARD_AFTER_PASTE_POLICY not in ("restore", "clear", "preserve"):
@@ -180,8 +191,11 @@ def prebuffer_worker():
             _prebuffer_deque.append(chunk)
             if _recording:
                 _audio_frames.append(chunk)
-    stream.stop_stream()
-    stream.close()
+    try:
+        stream.stop_stream()
+        stream.close()
+    except Exception:
+        pass
 
 
 def start_recording():
@@ -221,7 +235,7 @@ def transcribe(wav_buffer):
         wav_buffer,
         language=WHISPER_LANGUAGE,
         initial_prompt=WHISPER_INITIAL_PROMPT,
-        beam_size=5,
+        beam_size=3,
         vad_filter=True,
         vad_parameters=dict(min_silence_duration_ms=500),
     )
@@ -230,25 +244,53 @@ def transcribe(wav_buffer):
     return text, info.language
 
 
+def _llm_request_ollama(prompt):
+    """Send request to Ollama native API."""
+    r = requests.post(
+        LLM_URL,
+        json={
+            "model": LLM_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": 0.1, "num_predict": len(prompt) * 2},
+        },
+        timeout=30,
+    )
+    return r.json()["response"].strip()
+
+
+def _llm_request_openai(prompt):
+    """Send request to OpenAI-compatible API (LM Studio, llama.cpp, etc.)."""
+    headers = {"Content-Type": "application/json"}
+    if LLM_API_KEY:
+        headers["Authorization"] = f"Bearer {LLM_API_KEY}"
+    r = requests.post(
+        LLM_URL,
+        headers=headers,
+        json={
+            "model": LLM_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.1,
+            "max_tokens": len(prompt) * 2,
+            "stream": False,
+        },
+        timeout=30,
+    )
+    return r.json()["choices"][0]["message"]["content"].strip()
+
+
 def transform_with_llm(raw_text, detected_lang):
-    """LLM transform: post-process transcription via Ollama."""
+    """LLM transform: post-process transcription via configured backend."""
     if not raw_text.strip():
         return raw_text
-    print("🔄 LLM transform...")
+    print(f"🔄 LLM transform ({LLM_BACKEND})...")
     t0 = time.time()
     prompt = LLM_TRANSFORM_PROMPT.format(detected_lang=detected_lang, raw_text=raw_text)
     try:
-        r = requests.post(
-            OLLAMA_URL,
-            json={
-                "model": OLLAMA_MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "options": {"temperature": 0.1, "num_predict": len(raw_text) * 2},
-            },
-            timeout=30,
-        )
-        result = r.json()["response"].strip()
+        if LLM_BACKEND == "openai":
+            result = _llm_request_openai(prompt)
+        else:
+            result = _llm_request_ollama(prompt)
         print(f"✨ LLM ({time.time() - t0:.1f}s): {result}")
         return result
     except Exception as e:
@@ -260,8 +302,23 @@ def transform_with_llm(raw_text, detected_lang):
 # Output: clipboard and/or paste to active window
 # -----------------------------------------------------------------------------
 
+def _send_paste():
+    """Send paste keystroke via keyboard lib."""
+    if PASTE_METHOD == "ctrl+shift+v":
+        keyboard.send("ctrl+shift+v")
+    elif PASTE_METHOD == "shift+insert":
+        keyboard.send("shift+insert")
+    else:
+        keyboard.send("ctrl+v")
+
+
+def _send_keys_after():
+    """Send KEYS_AFTER_PASTE via keyboard lib."""
+    keyboard.send(KEYS_AFTER_PASTE)
+
+
 def paste_to_front(text):
-    """Copy to clipboard and/or paste to active window (Ctrl+V). If KEYS_AFTER_PASTE set, send that key(s) after paste."""
+    """Copy to clipboard and/or paste to active window via SendInput."""
     if not text.strip():
         print("❌ Empty text, skipping")
         return
@@ -273,13 +330,15 @@ def paste_to_front(text):
     if COPY_TO_CLIPBOARD:
         print("📋 Copied to clipboard!")
     if PASTE_TO_ACTIVE_WINDOW:
-        keyboard.send("ctrl+v")
-        time.sleep(0.1)
+        _send_paste()
+        time.sleep(0.15)
         if KEYS_AFTER_PASTE:
             time.sleep(0.05)
-            keyboard.send(KEYS_AFTER_PASTE)
+            _send_keys_after()
         suffix = f' + "{KEYS_AFTER_PASTE.upper()}"' if KEYS_AFTER_PASTE else ""
-        print(f"✅ Pasted to active window{suffix}!")
+        print(f"✅ Pasted ({PASTE_METHOD}){suffix}!")
+        # Wait for paste to complete before touching clipboard
+        time.sleep(0.3)
         if CLIPBOARD_AFTER_PASTE_POLICY == "restore":
             pyperclip.copy(old)
         elif CLIPBOARD_AFTER_PASTE_POLICY == "clear":
@@ -353,9 +412,9 @@ def _format_banner():
         line("     🎤 Whisper-PTT ready!", w - 1) + "\n",
         line("") + "\n",
         line(f'     Hotkey: "{HOTKEY.upper()}" (hold to record, release to transcribe)') + "\n",
-        line(f"     LLM transform: {'ON' if USE_LLM_TRANSFORM else 'OFF'}") + "\n",
+        line(f"     LLM transform: {'ON (' + LLM_BACKEND + ')' if USE_LLM_TRANSFORM else 'OFF'}") + "\n",
         line(f"     Copy to clipboard: {'ON' if COPY_TO_CLIPBOARD else 'OFF'}") + "\n",
-        line(f"     Paste to active window: {'ON' if PASTE_TO_ACTIVE_WINDOW else 'OFF'}") + "\n",
+        line(f"     Paste to active window: {'ON (' + PASTE_METHOD + ')' if PASTE_TO_ACTIVE_WINDOW else 'OFF'}") + "\n",
     ]
     if PASTE_TO_ACTIVE_WINDOW:
         parts.append((line(f'     Keys after paste: "{KEYS_AFTER_PASTE.upper()}"') if KEYS_AFTER_PASTE else line("     Keys after paste: —")) + "\n")
@@ -383,12 +442,17 @@ def main():
     print(_format_banner())
     print(f'👂 Listening — hold "{HOTKEY.upper()}" to start recording.')
 
-    # When hotkey is Pause, suppress it so the terminal doesn't freeze (Pause normally pauses terminal output)
-    _suppress_pause = (HOTKEY_KEY == "pause")
-    keyboard.on_press_key(HOTKEY_KEY, _on_hotkey_press, suppress=_suppress_pause)
-    keyboard.on_release_key(HOTKEY_KEY, _on_hotkey_release, suppress=_suppress_pause)
+    # Suppress the hotkey so the OS doesn't process it (e.g. Alt opening menus, Pause freezing terminal)
+    _suppress = HOTKEY_KEY in ("alt", "pause")
+    keyboard.on_press_key(HOTKEY_KEY, _on_hotkey_press, suppress=_suppress)
+    keyboard.on_release_key(HOTKEY_KEY, _on_hotkey_release, suppress=_suppress)
 
-    keyboard.wait("esc")
+    # Block forever — exit only via Ctrl+C
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
