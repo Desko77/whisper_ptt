@@ -98,10 +98,10 @@ LLM_TRANSFORM_PROMPT = _env("LLM_TRANSFORM_PROMPT", DEFAULT_LLM_TRANSFORM_PROMPT
 # Output: copy to clipboard and/or paste to active window
 COPY_TO_CLIPBOARD = _env("COPY_TO_CLIPBOARD", "true", type_=bool)
 PASTE_TO_ACTIVE_WINDOW = _env("PASTE_TO_ACTIVE_WINDOW", "true", type_=bool)
-# Paste method: sendinput (Windows API) | ctrl+v | ctrl+shift+v (terminals)
-PASTE_METHOD = _env("PASTE_METHOD", "ctrl+v").strip().lower()
-if PASTE_METHOD not in ("ctrl+v", "ctrl+shift+v", "shift+insert"):
-    raise SystemExit(f"Invalid config: PASTE_METHOD must be ctrl+v, ctrl+shift+v, or shift+insert (got {PASTE_METHOD!r}).")
+# Paste method: auto (detect terminals) | ctrl+v | ctrl+shift+v | shift+insert
+PASTE_METHOD = _env("PASTE_METHOD", "auto").strip().lower()
+if PASTE_METHOD not in ("auto", "ctrl+v", "ctrl+shift+v", "shift+insert"):
+    raise SystemExit(f"Invalid config: PASTE_METHOD must be auto, ctrl+v, ctrl+shift+v, or shift+insert (got {PASTE_METHOD!r}).")
 # Clipboard after paste (only when Paste is on): restore | clear | preserve
 CLIPBOARD_AFTER_PASTE_POLICY = _env("CLIPBOARD_AFTER_PASTE_POLICY", "restore").strip().lower()
 if CLIPBOARD_AFTER_PASTE_POLICY not in ("restore", "clear", "preserve"):
@@ -168,14 +168,31 @@ def _prebuffer_size():
 # Audio: prebuffer and WAV
 # -----------------------------------------------------------------------------
 
+_MIC_MAX_RETRIES = 5
+_MIC_RETRY_DELAY = 1.0
+
+
 def _open_microphone_stream():
-    return _pyaudio_instance.open(
-        format=AUDIO_FORMAT,
-        channels=CHANNELS,
-        rate=SAMPLE_RATE,
-        input=True,
-        frames_per_buffer=CHUNK_SIZE,
-    )
+    """Open mic stream, retrying with PyAudio re-init on transient PortAudio errors."""
+    global _pyaudio_instance
+    for attempt in range(1, _MIC_MAX_RETRIES + 1):
+        try:
+            return _pyaudio_instance.open(
+                format=AUDIO_FORMAT,
+                channels=CHANNELS,
+                rate=SAMPLE_RATE,
+                input=True,
+                frames_per_buffer=CHUNK_SIZE,
+            )
+        except OSError as e:
+            print(f"⚠️  Mic open failed (attempt {attempt}/{_MIC_MAX_RETRIES}): {e}")
+            try:
+                _pyaudio_instance.terminate()
+            except Exception:
+                pass
+            time.sleep(_MIC_RETRY_DELAY * attempt)
+            _pyaudio_instance = pyaudio.PyAudio()
+    raise RuntimeError("Could not open microphone after retries — check audio permissions and device.")
 
 
 def prebuffer_worker():
@@ -185,7 +202,21 @@ def prebuffer_worker():
     while _prebuffer_running:
         try:
             chunk = stream.read(CHUNK_SIZE, exception_on_overflow=False)
-        except Exception:
+        except OSError as e:
+            print(f"⚠️  Mic read error: {e} — reopening stream...")
+            try:
+                stream.stop_stream()
+                stream.close()
+            except Exception:
+                pass
+            try:
+                stream = _open_microphone_stream()
+            except RuntimeError:
+                print("❌ Mic recovery failed, prebuffer stopping.")
+                return
+            continue
+        except Exception as e:
+            print(f"⚠️  Unexpected mic error: {e} — stopping prebuffer.")
             break
         with _prebuffer_lock:
             _prebuffer_deque.append(chunk)
@@ -302,11 +333,55 @@ def transform_with_llm(raw_text, detected_lang):
 # Output: clipboard and/or paste to active window
 # -----------------------------------------------------------------------------
 
+# Terminal process names — these windows use Ctrl+Shift+V for paste
+_TERMINAL_PROCESSES = frozenset({
+    "windowsterminal.exe", "cmd.exe", "powershell.exe", "pwsh.exe",
+    "conhost.exe", "wezterm-gui.exe", "alacritty.exe", "hyper.exe",
+    "mintty.exe", "wsl.exe", "bash.exe", "git-bash.exe",
+    "claude.exe",
+})
+
+
+def _get_foreground_process_name():
+    """Get the executable name of the foreground window process."""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        return ""
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+    if not handle:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(260)
+        size = wintypes.DWORD(260)
+        kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size))
+        return os.path.basename(buf.value).lower()
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _resolve_paste_method():
+    """Return the actual paste keystroke string for the current foreground window."""
+    if PASTE_METHOD != "auto":
+        return PASTE_METHOD
+    proc = _get_foreground_process_name()
+    if proc in _TERMINAL_PROCESSES:
+        return "ctrl+shift+v"
+    return "ctrl+v"
+
+
 def _send_paste():
     """Send paste keystroke via keyboard lib."""
-    if PASTE_METHOD == "ctrl+shift+v":
+    method = _resolve_paste_method()
+    if method == "ctrl+shift+v":
         keyboard.send("ctrl+shift+v")
-    elif PASTE_METHOD == "shift+insert":
+    elif method == "shift+insert":
         keyboard.send("shift+insert")
     else:
         keyboard.send("ctrl+v")
@@ -329,14 +404,17 @@ def paste_to_front(text):
     pyperclip.copy(text)
     if COPY_TO_CLIPBOARD:
         print("📋 Copied to clipboard!")
+        import winsound
+        winsound.MessageBeep(winsound.MB_OK)
     if PASTE_TO_ACTIVE_WINDOW:
+        actual_method = _resolve_paste_method()
         _send_paste()
         time.sleep(0.15)
         if KEYS_AFTER_PASTE:
             time.sleep(0.05)
             _send_keys_after()
         suffix = f' + "{KEYS_AFTER_PASTE.upper()}"' if KEYS_AFTER_PASTE else ""
-        print(f"✅ Pasted ({PASTE_METHOD}){suffix}!")
+        print(f"✅ Pasted ({actual_method}){suffix}!")
         # Wait for paste to complete before touching clipboard
         time.sleep(0.3)
         if CLIPBOARD_AFTER_PASTE_POLICY == "restore":
