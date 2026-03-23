@@ -266,7 +266,7 @@ def transcribe(wav_buffer):
         wav_buffer,
         language=WHISPER_LANGUAGE,
         initial_prompt=WHISPER_INITIAL_PROMPT,
-        beam_size=3,
+        beam_size=1,
         vad_filter=True,
         vad_parameters=dict(min_silence_duration_ms=500),
     )
