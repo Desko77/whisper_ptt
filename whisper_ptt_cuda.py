@@ -85,19 +85,20 @@ LLM_URL = _env("LLM_URL", _env("OLLAMA_URL",
     else "http://localhost:1234/v1/chat/completions"))
 LLM_API_KEY = _env("LLM_API_KEY", "")
 DEFAULT_LLM_TRANSFORM_PROMPT_RU = """Исправь следующую расшифровку речи. Правила:
-- Исправь ТОЛЬКО грамматику, пунктуацию и заглавные буквы
+- Исправь пунктуацию, заглавные буквы и явные грамматические ошибки
 - Убери слова-паразиты (эм, ну, типа, вот, короче и т.д.)
+- При сомнении — НЕ меняй. Лучше оставить как есть, чем испортить
 - НЕ перефразируй — сохраняй порядок слов и структуру предложения
 - Технические термины, названия и специальную лексику оставляй как есть
 - Пиши ТОЛЬКО на русском языке, НЕ транслитерируй в латиницу
-- Если текст уже чистый, верни как есть
 - Верни ТОЛЬКО исправленный текст, без пояснений
 
 Расшифровка: {raw_text}"""
 
 DEFAULT_LLM_TRANSFORM_PROMPT = """Fix the following speech-to-text transcription. Rules:
-- Fix ONLY grammar, punctuation, and capitalization
+- Fix punctuation, capitalization, and obvious grammar errors
 - Remove filler words (um, uh, like, etc.)
+- When in doubt — do NOT change. Better to leave as-is than to break it
 - Do NOT rephrase — preserve word order and sentence structure
 - Keep technical terms, names, and domain-specific vocabulary as-is
 - Keep the original language ({detected_lang}) — do NOT transliterate to Latin script
