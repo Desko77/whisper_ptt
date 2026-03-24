@@ -82,12 +82,13 @@ LLM_URL = _env("LLM_URL", _env("OLLAMA_URL",
     else "http://localhost:1234/v1/chat/completions"))
 LLM_API_KEY = _env("LLM_API_KEY", "")
 DEFAULT_LLM_TRANSFORM_PROMPT = """Fix the following speech-to-text transcription. Rules:
-- Fix grammar, punctuation, and capitalization
+- Fix ONLY grammar, punctuation, and capitalization
 - Remove filler words (um, uh, like, etc.)
+- Do NOT rephrase — preserve word order and sentence structure
+- Keep technical terms, names, and domain-specific vocabulary as-is
 - Keep the original language ({detected_lang})
-- Keep the original meaning — do NOT add or change content
 - If it's already clean, return as-is
-- Return ONLY the cleaned text, nothing else
+- Return ONLY the cleaned text, no explanations
 
 Transcription: {raw_text}"""
 LLM_TRANSFORM_PROMPT = _env("LLM_TRANSFORM_PROMPT", DEFAULT_LLM_TRANSFORM_PROMPT)

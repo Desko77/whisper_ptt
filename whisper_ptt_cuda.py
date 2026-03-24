@@ -84,16 +84,37 @@ LLM_URL = _env("LLM_URL", _env("OLLAMA_URL",
     "http://localhost:11434/api/generate" if LLM_BACKEND == "ollama"
     else "http://localhost:1234/v1/chat/completions"))
 LLM_API_KEY = _env("LLM_API_KEY", "")
+DEFAULT_LLM_TRANSFORM_PROMPT_RU = """Исправь следующую расшифровку речи. Правила:
+- Исправь ТОЛЬКО грамматику, пунктуацию и заглавные буквы
+- Убери слова-паразиты (эм, ну, типа, вот, короче и т.д.)
+- НЕ перефразируй — сохраняй порядок слов и структуру предложения
+- Технические термины, названия и специальную лексику оставляй как есть
+- Пиши ТОЛЬКО на русском языке, НЕ транслитерируй в латиницу
+- Если текст уже чистый, верни как есть
+- Верни ТОЛЬКО исправленный текст, без пояснений
+
+Расшифровка: {raw_text}"""
+
 DEFAULT_LLM_TRANSFORM_PROMPT = """Fix the following speech-to-text transcription. Rules:
-- Fix grammar, punctuation, and capitalization
+- Fix ONLY grammar, punctuation, and capitalization
 - Remove filler words (um, uh, like, etc.)
-- Keep the original language ({detected_lang})
-- Keep the original meaning — do NOT add or change content
+- Do NOT rephrase — preserve word order and sentence structure
+- Keep technical terms, names, and domain-specific vocabulary as-is
+- Keep the original language ({detected_lang}) — do NOT transliterate to Latin script
 - If it's already clean, return as-is
-- Return ONLY the cleaned text, nothing else
+- Return ONLY the cleaned text, no explanations
 
 Transcription: {raw_text}"""
-LLM_TRANSFORM_PROMPT = _env("LLM_TRANSFORM_PROMPT", DEFAULT_LLM_TRANSFORM_PROMPT)
+
+def _get_llm_prompt():
+    custom = _env("LLM_TRANSFORM_PROMPT", "")
+    if custom:
+        return custom
+    if WHISPER_LANGUAGE and WHISPER_LANGUAGE.startswith("ru"):
+        return DEFAULT_LLM_TRANSFORM_PROMPT_RU
+    return DEFAULT_LLM_TRANSFORM_PROMPT
+
+LLM_TRANSFORM_PROMPT = _get_llm_prompt()
 
 # Output: copy to clipboard and/or paste to active window
 COPY_TO_CLIPBOARD = _env("COPY_TO_CLIPBOARD", "true", type_=bool)
