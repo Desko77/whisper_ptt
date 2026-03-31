@@ -1,18 +1,33 @@
 # Whisper-PTT
 
-**Stupidly Simple Local Push-to-Talk** Voice-to-Text You Can Review Over a Coffee. Powered by Whisper. Fully offline — nothing leaves your machine.
+**Local Push-to-Talk Voice-to-Text** with system tray GUI, recording overlay, and optional LLM post-processing. Fully offline - nothing leaves your machine.
 
-Hold a hotkey, speak, release. Transcribed text is pasted into the active window (or copied to clipboard). Optionally, a local LLM (Ollama) can transform the output — fix grammar, reformat as an email, translate, or anything else you can describe in a prompt.
+Hold a hotkey, speak, release. Transcribed text is pasted into the active window (or copied to clipboard). A local LLM (Ollama, LM Studio, or any OpenAI-compatible server) can optionally transform the output - fix grammar, translate, reformat, or anything else you can describe in a prompt.
+
+> Based on [sancau/whisper_ptt](https://github.com/sancau/whisper_ptt). This project has diverged significantly with a GUI, chunked transcription, multi-backend LLM support, and many other features.
 
 <p align="center"><img src="assets/demo_apple.gif" alt="Whisper-PTT demo" width="820"></p>
 
 ---
 
+## Features
+
+- **System tray GUI** (PySide6) - tray icon, recording overlay with waveform, settings dialog
+- **Push-to-talk** - hold hotkey to record, release to transcribe and paste
+- **GPU-accelerated Whisper** - NVIDIA CUDA (faster-whisper) or Apple Silicon (mlx-whisper)
+- **Chunked transcription** - long recordings split into overlapping chunks for better accuracy
+- **LLM post-processing** - Ollama or OpenAI-compatible backends (LM Studio, llama.cpp, etc.)
+- **Smart paste** - auto-detect terminals, configurable paste method and keys after paste
+- **Windows autostart** - launch at login with startup delay for reliable hotkey registration
+- **Single instance** - prevents duplicate processes
+- **Logging** - optional file logging for diagnostics
+- **Fully configurable** - all settings via `.env` file or GUI settings dialog
+
+---
+
 ## Platforms
 
-Single script per platform — so you know exactly what you're running.
-
-GPU acceleration is required — there is no CPU-only mode. One self-contained script per platform:
+GPU acceleration is required - no CPU-only mode. One self-contained script per platform:
 
 | Platform | Script | Whisper backend | Accelerator |
 |----------|--------|-----------------|-------------|
@@ -26,12 +41,22 @@ GPU acceleration is required — there is no CPU-only mode. One self-contained s
 ### Windows / Linux (NVIDIA CUDA)
 
 ```bash
-git clone https://github.com/sancau/whisper-ptt.git
-cd whisper-ptt
+git clone https://github.com/Desko77/whisper_ptt.git
+cd whisper_ptt
 python -m venv venv
 source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements-cuda.txt
 cp .env.example-cuda .env       # edit as needed
+```
+
+**GUI mode** (recommended on Windows):
+```bash
+pythonw whisper_ptt_gui.py
+# or use run_gui.bat
+```
+
+**Console mode**:
+```bash
 python whisper_ptt_cuda.py
 ```
 
@@ -40,8 +65,8 @@ On Linux, the `keyboard` library needs root for global hotkeys: `sudo python whi
 ### macOS (Apple Silicon)
 
 ```bash
-git clone https://github.com/sancau/whisper-ptt.git
-cd whisper-ptt
+git clone https://github.com/Desko77/whisper_ptt.git
+cd whisper_ptt
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements-apple-silicon.txt
@@ -55,14 +80,14 @@ macOS will prompt for **Accessibility** and **Input Monitoring** permissions on 
 
 Supports two backends for LLM post-processing:
 
-- **Ollama** — native Ollama API
-- **OpenAI-compatible** — LM Studio, llama.cpp server, or any OpenAI-compatible endpoint
+- **Ollama** - native Ollama API
+- **OpenAI-compatible** - LM Studio, llama.cpp server, or any OpenAI-compatible endpoint
 
 ```bash
 # Option 1: Ollama
 ollama pull gemma3:12b
 
-# Option 2: LM Studio — download a model via LM Studio UI, start the server
+# Option 2: LM Studio - download a model via LM Studio UI, start the server
 ```
 
 Set `WHISPER_PTT_USE_LLM_TRANSFORM=true` and configure the backend in `.env`:
@@ -79,13 +104,26 @@ WHISPER_PTT_LLM_MODEL=google/gemma-3-12b
 WHISPER_PTT_LLM_URL=http://localhost:1234/v1/chat/completions
 ```
 
-The default prompt cleans up grammar and filler words; replace it via `WHISPER_PTT_LLM_TRANSFORM_PROMPT` to translate, reformat, or do anything else.
+The default prompt cleans up grammar and filler words. A separate Russian prompt is used automatically when `WHISPER_LANGUAGE=ru`. Replace via `WHISPER_PTT_LLM_TRANSFORM_PROMPT` to translate, reformat, or do anything else.
+
+---
+
+## GUI
+
+The GUI runs as a system tray application with:
+
+- **Tray icon** - changes color based on state (loading/idle/recording/processing)
+- **Recording overlay** - translucent waveform indicator, draggable
+- **Settings dialog** - all configuration in one place, organized by category
+- **Notifications** - balloon notifications with transcribed text
+- **Autostart** - "Start with Windows" option in settings
+- **Re-register hotkeys** - tray menu option if hotkeys stop working
 
 ---
 
 ## Configuration
 
-All settings are read from `WHISPER_PTT_*` environment variables or a `.env` file. Both scripts use the same variable names.
+All settings are read from `WHISPER_PTT_*` environment variables, a `.env` file, or the GUI settings dialog. Both scripts use the same variable names.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -98,9 +136,11 @@ All settings are read from `WHISPER_PTT_*` environment variables or a `.env` fil
 | `WHISPER_PTT_LLM_URL` | LLM API URL | auto by backend |
 | `WHISPER_PTT_COPY_TO_CLIPBOARD` | Copy result to clipboard | `true` |
 | `WHISPER_PTT_PASTE_TO_ACTIVE_WINDOW` | Paste into focused window | `true` |
-| `WHISPER_PTT_PASTE_METHOD` | Paste method: `ctrl+v`, `ctrl+shift+v`, `shift+insert` | `ctrl+v` |
+| `WHISPER_PTT_PASTE_METHOD` | Paste method: `auto`, `ctrl+v`, `ctrl+shift+v`, `shift+insert` | `auto` |
 | `WHISPER_PTT_CLIPBOARD_AFTER_PASTE_POLICY` | After paste: `restore`, `clear`, or `preserve` | `restore` |
 | `WHISPER_PTT_KEYS_AFTER_PASTE` | Key(s) to send after paste (`enter`, `ctrl+enter`, `none`) | `enter` |
+| `WHISPER_PTT_CHUNK_DURATION_SEC` | Chunk duration for long recordings (0 = disabled) | `15` |
+| `WHISPER_PTT_CHUNK_OVERLAP_SEC` | Overlap between chunks | `2.0` |
 
 <details>
 <summary>Advanced settings</summary>
@@ -108,7 +148,7 @@ All settings are read from `WHISPER_PTT_*` environment variables or a `.env` fil
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `WHISPER_PTT_WHISPER_INITIAL_PROMPT` | Whisper initial prompt (language hint) | `English speech.` |
-| `WHISPER_PTT_LLM_API_KEY` | API key for OpenAI-compatible servers (if required) | — |
+| `WHISPER_PTT_LLM_API_KEY` | API key for OpenAI-compatible servers (if required) | - |
 | `WHISPER_PTT_LLM_TRANSFORM_PROMPT` | Custom LLM prompt (`{detected_lang}`, `{raw_text}` placeholders) | built-in |
 | `WHISPER_PTT_SAMPLE_RATE` | Audio sample rate (Hz) | `16000` |
 | `WHISPER_PTT_CHUNK_SIZE` | Audio chunk size | `1024` |
@@ -116,6 +156,9 @@ All settings are read from `WHISPER_PTT_*` environment variables or a `.env` fil
 | `WHISPER_PTT_PADDING_SEC` | Silence padding before transcription | `0.2` |
 | `WHISPER_PTT_MIN_FRAMES` | Min frames to process (skip accidental taps) | `5` |
 | `WHISPER_PTT_SILENCE_AMPLITUDE` | Amplitude below which audio is treated as silence | `750` |
+| `WHISPER_PTT_LOG_ENABLED` | Enable file logging | `false` |
+| `WHISPER_PTT_LOG_FILE` | Log file path | `whisper_ptt.log` |
+| `WHISPER_PTT_SHOW_NOTIFICATIONS` | Show balloon notifications | `true` |
 
 </details>
 
@@ -123,12 +166,14 @@ All settings are read from `WHISPER_PTT_*` environment variables or a `.env` fil
 
 ## Usage
 
-Default hotkey: **Alt** (Windows/Linux) or **Option** (macOS). Hold to record, release to transcribe. Exit with Ctrl+C. The defaults are convenient but can interfere with other shortcuts — consider remapping to `pause` or a combo like `option+f2` via `WHISPER_PTT_HOTKEY`.
+Default hotkey: **Alt** (Windows/Linux) or **Option** (macOS). Hold to record, release to transcribe. Exit with Ctrl+C (console) or Quit from tray menu (GUI). The defaults are convenient but can interfere with other shortcuts - consider remapping to `pause` or a combo like `option+f2` via `WHISPER_PTT_HOTKEY`.
 
-With LLM transform enabled, the raw transcription is passed through Ollama before pasting. What the LLM does is entirely controlled by the prompt — grammar cleanup, email formatting, translation, or any other text transformation.
+With LLM transform enabled, the raw transcription is passed through the LLM before pasting. What the LLM does is entirely controlled by the prompt - grammar cleanup, email formatting, translation, or any other text transformation.
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE).
+
+Based on [whisper_ptt](https://github.com/sancau/whisper_ptt) by Alexander Tatchin.
