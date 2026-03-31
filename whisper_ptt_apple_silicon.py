@@ -10,6 +10,7 @@ Optional: Ollama for LLM transform.
 """
 
 import os
+import logging
 import queue
 import subprocess
 import time
@@ -123,9 +124,40 @@ SILENCE_AMPLITUDE_THRESHOLD = _env("SILENCE_AMPLITUDE", "750", type_=int)
 CHUNK_DURATION_SEC = _env("CHUNK_DURATION_SEC", "15", type_=float)
 CHUNK_OVERLAP_SEC = _env("CHUNK_OVERLAP_SEC", "2.0", type_=float)
 
+# Logging
+LOG_ENABLED = _env("LOG_ENABLED", "false", type_=bool)
+SHOW_NOTIFICATIONS = _env("SHOW_NOTIFICATIONS", "true", type_=bool)
+LOG_FILE = _env("LOG_FILE", os.path.join(_script_dir, "whisper_ptt.log"))
+
+_logger = logging.getLogger("whisper_ptt")
+_logger.setLevel(logging.DEBUG)
+_log_handler = None
+
+
+def _setup_logging():
+    global _log_handler
+    if _log_handler:
+        return
+    if not LOG_ENABLED:
+        _logger.addHandler(logging.NullHandler())
+        return
+    _log_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    _log_handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    ))
+    _logger.addHandler(_log_handler)
+    _logger.info("--- Logging started (pid=%d) ---", os.getpid())
+
+
+_setup_logging()
+
+
+def get_log_path():
+    return LOG_FILE
+
 
 # -----------------------------------------------------------------------------
-# MLX model name → HuggingFace repo mapping
+# MLX model name -> HuggingFace repo mapping
 # -----------------------------------------------------------------------------
 
 _MLX_MODEL_MAP = {
@@ -159,10 +191,13 @@ _audio_frames = []
 _prebuffer_deque = None
 _prebuffer_lock = threading.Lock()
 _prebuffer_running = True
+_prebuffer_thread = None
 _pyaudio_instance = None
 _mlx_model_path = None
 _transcribe_queue = queue.Queue()
 _model_ready = threading.Event()
+_transcription_thread = None
+_hotkey_listener = None
 
 # Chunked transcription state
 _chunk_results = []            # [(chunk_index, raw_text, lang)]
@@ -172,6 +207,34 @@ _next_chunk_frame = 0          # frame index where next chunk starts
 _chunking_active = False
 _prev_chunk_tail_text = ""     # last ~30 words for initial_prompt context
 _chunk_transcribe_queue = queue.Queue()  # chunks enqueued during recording
+
+# GUI callbacks (optional - None in console mode)
+_audio_level_callback = None   # fn(peak: float) called from prebuffer thread
+_event_callback = None         # fn(event: str, data: dict) called from various threads
+
+
+def set_audio_level_callback(fn):
+    """Register callback for audio level updates. fn(peak_amplitude: float)."""
+    global _audio_level_callback
+    _audio_level_callback = fn
+
+
+def set_event_callback(fn):
+    """Register callback for events. fn(event: str, data: dict).
+    Events: recording_started, recording_stopped, processing_started,
+            transcription_done, error."""
+    global _event_callback
+    _event_callback = fn
+
+
+def _fire_event(event, data=None):
+    """Fire event callback if registered."""
+    cb = _event_callback
+    if cb:
+        try:
+            cb(event, data or {})
+        except Exception:
+            pass
 
 
 def _prebuffer_size():
@@ -231,6 +294,15 @@ def prebuffer_worker():
             continue
         except Exception:
             break
+        # Compute audio level OUTSIDE lock to avoid contention
+        level_cb = _audio_level_callback
+        if level_cb:
+            try:
+                audio_int16 = np.frombuffer(chunk, dtype=np.int16)
+                peak = float(np.max(np.abs(audio_int16))) if audio_int16.size > 0 else 0.0
+                level_cb(peak)
+            except Exception:
+                pass
         with _prebuffer_lock:
             _prebuffer_deque.append(chunk)
             if _recording:
@@ -241,8 +313,11 @@ def prebuffer_worker():
                     frames_since = len(_audio_frames) - _next_chunk_frame
                     if frames_since >= chunk_threshold:
                         _extract_and_submit_chunk()
-    stream.stop_stream()
-    stream.close()
+    try:
+        stream.stop_stream()
+        stream.close()
+    except Exception:
+        pass
 
 
 def start_recording():
@@ -252,6 +327,8 @@ def start_recording():
         _audio_frames[:] = list(_prebuffer_deque)
     _recording = True
     print("🎙️ Recording...")
+    _logger.info("Recording started")
+    _fire_event("recording_started")
 
 
 def frames_to_numpy(frames, prepend_silence_sec=0):
@@ -350,7 +427,9 @@ def transcribe(audio_np):
     )
     text = result["text"].strip()
     lang = result.get("language", WHISPER_LANGUAGE)
-    print(f"📝 Whisper ({time.time() - t0:.1f}s): {text}")
+    elapsed = time.time() - t0
+    print(f"📝 Whisper ({elapsed:.1f}s): {text}")
+    _logger.info("Whisper %.1fs: %s", elapsed, text)
     return text, lang
 
 
@@ -366,7 +445,9 @@ def _transcribe_chunk(audio_np, initial_prompt):
     )
     text = result["text"].strip()
     lang = result.get("language", WHISPER_LANGUAGE)
-    print(f"   📝 Chunk ({time.time() - t0:.1f}s): {text[:80]}{'...' if len(text) > 80 else ''}")
+    elapsed = time.time() - t0
+    print(f"   📝 Chunk ({elapsed:.1f}s): {text[:80]}{'...' if len(text) > 80 else ''}")
+    _logger.info("Chunk %.1fs: %s", elapsed, text[:120])
     return text, lang
 
 
@@ -417,10 +498,13 @@ def transform_with_llm(raw_text, detected_lang):
             result = _llm_request_openai(prompt)
         else:
             result = _llm_request_ollama(prompt)
-        print(f"✨ LLM ({time.time() - t0:.1f}s): {result}")
+        elapsed = time.time() - t0
+        print(f"✨ LLM ({elapsed:.1f}s): {result}")
+        _logger.info("LLM %s %.1fs: %s", LLM_BACKEND, elapsed, result)
         return result
     except Exception as e:
         print(f"❌ LLM error: {e}, using raw text")
+        _logger.error("LLM error: %s", e)
         return raw_text
 
 
@@ -481,6 +565,7 @@ def paste_to_front(text):
         return
     if not COPY_TO_CLIPBOARD and not PASTE_TO_ACTIVE_WINDOW:
         print("✅ Done (console only)")
+        _fire_event("transcription_done", {"text": text})
         return
     old = pyperclip.paste()
     pyperclip.copy(text)
@@ -494,10 +579,12 @@ def paste_to_front(text):
             _send_keys_after_paste()
         suffix = f' + "{KEYS_AFTER_PASTE.upper()}"' if KEYS_AFTER_PASTE else ""
         print(f"✅ Pasted to active window{suffix}!")
+        _logger.info("Pasted: %s", text[:120])
         if CLIPBOARD_AFTER_PASTE_POLICY == "restore":
             pyperclip.copy(old)
         elif CLIPBOARD_AFTER_PASTE_POLICY == "clear":
             pyperclip.copy("")
+    _fire_event("transcription_done", {"text": text})
 
 
 # -----------------------------------------------------------------------------
@@ -653,15 +740,19 @@ def stop_recording_and_process():
     if not _recording:
         return
     _recording = False
+    _fire_event("recording_stopped")
     time.sleep(0.15)
 
-    frames = list(_audio_frames)
+    with _prebuffer_lock:
+        frames = list(_audio_frames)
     duration_sec = len(frames) * CHUNK_SIZE / SAMPLE_RATE
     print(f"⏹️ Recorded {duration_sec:.1f}s (with {PREBUFFER_SEC}s prebuffer)")
+    _logger.info("Recorded %.1fs", duration_sec)
 
     # Only process recordings longer than 0.7 seconds in total.
     if duration_sec <= 0.7 or len(frames) < MIN_FRAMES:
         print("❌ Recording too short")
+        _logger.info("Skipped: too short (%.1fs)", duration_sec)
         _reset_chunk_state()
         return
 
@@ -673,12 +764,14 @@ def stop_recording_and_process():
         _reset_chunk_state()
         return
 
+    _fire_event("processing_started")
+
     if not _chunking_active:
-        # Short recording — single-pass (existing behavior)
+        # Short recording - single-pass (existing behavior)
         _reset_chunk_state()
         _transcribe_queue.put(frames)
     else:
-        # Long recording — extract final chunk and assemble all
+        # Long recording - extract final chunk and assemble all
         _extract_final_chunk(frames)
         _chunk_transcribe_queue.put("ASSEMBLE")
 
@@ -786,22 +879,286 @@ def _format_banner():
     return "".join(parts)
 
 
-def main():
-    global _pyaudio_instance, _prebuffer_deque
+# -----------------------------------------------------------------------------
+# Init / shutdown / config API (used by GUI; console mode calls main())
+# -----------------------------------------------------------------------------
 
-    threading.Thread(target=_transcription_worker, daemon=True).start()
+def init_whisper():
+    """Start MLX transcription worker and wait for model to load. Blocking."""
+    global _transcription_thread
+    _transcription_thread = threading.Thread(target=_transcription_worker, daemon=True)
+    _transcription_thread.start()
     _model_ready.wait()
 
+
+def init_audio():
+    """Initialize PyAudio, prebuffer deque, and start prebuffer worker thread."""
+    global _pyaudio_instance, _prebuffer_deque, _prebuffer_running, _prebuffer_thread
+    _prebuffer_running = True
     _pyaudio_instance = pyaudio.PyAudio()
     _prebuffer_deque = collections.deque(maxlen=_prebuffer_size())
-
     print(f"🎧 Prebuffer active (last {PREBUFFER_SEC}s)")
-    threading.Thread(target=prebuffer_worker, daemon=True).start()
+    _prebuffer_thread = threading.Thread(target=prebuffer_worker, daemon=True)
+    _prebuffer_thread.start()
+
+
+def register_hotkeys():
+    """Start pynput hotkey listener in a background thread (non-blocking)."""
+    global _hotkey_listener
+    try:
+        from pynput import keyboard as pynput_keyboard
+    except ImportError:
+        print("❌ pynput is required on macOS. Install with:")
+        print("   pip install pynput")
+        return
+
+    Key = pynput_keyboard.Key
+    pressed = set()
+
+    def _spec_from_name(name):
+        if not name:
+            return None
+        n = str(name).strip().lower()
+        if n in ("cmd", "command"):
+            return Key.cmd
+        if n in ("option", "opt", "alt"):
+            return Key.alt
+        if n in ("ctrl", "control"):
+            return Key.ctrl
+        if n == "shift":
+            return Key.shift
+        if n.startswith("f") and n[1:].isdigit():
+            return getattr(Key, n, None)
+        if len(n) == 1:
+            return n
+        return None
+
+    hotkey_key_spec = _spec_from_name(HOTKEY_KEY)
+    hotkey_mod_spec = _spec_from_name(HOTKEY_MODIFIER) if HOTKEY_MODIFIER else None
+
+    def _matches(key, spec):
+        if spec is None:
+            return False
+        if isinstance(spec, str):
+            return getattr(key, "char", None) == spec
+        return key == spec
+
+    def on_press(key):
+        pressed.add(key)
+        if HOTKEY_MODIFIER is None:
+            if _matches(key, hotkey_key_spec):
+                _on_hotkey_press()
+        else:
+            if _matches(key, hotkey_key_spec) and any(
+                _matches(k, hotkey_mod_spec) for k in pressed
+            ):
+                _on_hotkey_press()
+
+    def on_release(key):
+        if HOTKEY_MODIFIER is None:
+            if _matches(key, hotkey_key_spec):
+                _on_hotkey_release()
+        else:
+            if _matches(key, hotkey_key_spec) or _matches(key, hotkey_mod_spec):
+                _on_hotkey_release()
+        pressed.discard(key)
+
+    _hotkey_listener = pynput_keyboard.Listener(on_press=on_press, on_release=on_release)
+    _hotkey_listener.start()
+
+
+def unregister_hotkeys():
+    """Stop pynput hotkey listener."""
+    global _hotkey_listener
+    if _hotkey_listener:
+        try:
+            _hotkey_listener.stop()
+        except Exception:
+            pass
+        _hotkey_listener = None
+
+
+def shutdown():
+    """Stop prebuffer worker, transcription worker, terminate PyAudio."""
+    global _prebuffer_running
+    _prebuffer_running = False
+    if _prebuffer_thread and _prebuffer_thread.is_alive():
+        _prebuffer_thread.join(timeout=3)
+    # Signal transcription worker to stop
+    _transcribe_queue.put(None)
+    if _transcription_thread and _transcription_thread.is_alive():
+        _transcription_thread.join(timeout=5)
+    if _pyaudio_instance:
+        try:
+            _pyaudio_instance.terminate()
+        except Exception:
+            pass
+
+
+def reload_config():
+    """Re-read .env and update module globals. Returns dict of changed keys."""
+    global WHISPER_LANGUAGE, WHISPER_INITIAL_PROMPT
+    global USE_LLM_TRANSFORM, LLM_BACKEND, LLM_MODEL, LLM_URL, LLM_API_KEY, LLM_TRANSFORM_PROMPT
+    global COPY_TO_CLIPBOARD, PASTE_TO_ACTIVE_WINDOW
+    global CLIPBOARD_AFTER_PASTE_POLICY, KEYS_AFTER_PASTE
+    global PREBUFFER_SEC, PADDING_SEC, MIN_FRAMES, SILENCE_AMPLITUDE_THRESHOLD
+    global CHUNK_DURATION_SEC, CHUNK_OVERLAP_SEC
+    global SHOW_NOTIFICATIONS, LOG_ENABLED, _log_handler
+
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(_env_path, override=True)
+    except ImportError:
+        pass
+
+    old = get_config()
+
+    WHISPER_LANGUAGE = _env("WHISPER_LANGUAGE", "en")
+    WHISPER_INITIAL_PROMPT = _env("WHISPER_INITIAL_PROMPT", "English speech.")
+    USE_LLM_TRANSFORM = _env("USE_LLM_TRANSFORM", "false", type_=bool)
+    LLM_BACKEND = _env("LLM_BACKEND", "ollama").strip().lower()
+    LLM_MODEL = _env("LLM_MODEL", _env("OLLAMA_MODEL", "gemma3:12b"))
+    LLM_URL = _env("LLM_URL", _env("OLLAMA_URL",
+        "http://localhost:11434/api/generate" if LLM_BACKEND == "ollama"
+        else "http://localhost:1234/v1/chat/completions"))
+    LLM_API_KEY = _env("LLM_API_KEY", "")
+    LLM_TRANSFORM_PROMPT = _env("LLM_TRANSFORM_PROMPT", DEFAULT_LLM_TRANSFORM_PROMPT)
+    COPY_TO_CLIPBOARD = _env("COPY_TO_CLIPBOARD", "true", type_=bool)
+    PASTE_TO_ACTIVE_WINDOW = _env("PASTE_TO_ACTIVE_WINDOW", "true", type_=bool)
+    CLIPBOARD_AFTER_PASTE_POLICY = _env("CLIPBOARD_AFTER_PASTE_POLICY", "restore").strip().lower()
+    KEYS_AFTER_PASTE = _env("KEYS_AFTER_PASTE", "enter").strip().lower()
+    if KEYS_AFTER_PASTE in ("", "none"):
+        KEYS_AFTER_PASTE = None
+    PREBUFFER_SEC = _env("PREBUFFER_SEC", "0.5", type_=float)
+    PADDING_SEC = _env("PADDING_SEC", "0.2", type_=float)
+    MIN_FRAMES = _env("MIN_FRAMES", "5", type_=int)
+    SILENCE_AMPLITUDE_THRESHOLD = _env("SILENCE_AMPLITUDE", "750", type_=int)
+    CHUNK_DURATION_SEC = _env("CHUNK_DURATION_SEC", "15", type_=float)
+    CHUNK_OVERLAP_SEC = _env("CHUNK_OVERLAP_SEC", "2.0", type_=float)
+    SHOW_NOTIFICATIONS = _env("SHOW_NOTIFICATIONS", "true", type_=bool)
+    new_log = _env("LOG_ENABLED", "false", type_=bool)
+    if new_log != LOG_ENABLED:
+        LOG_ENABLED = new_log
+        for h in list(_logger.handlers):
+            _logger.removeHandler(h)
+        if _log_handler:
+            _log_handler.close()
+            _log_handler = None
+        _setup_logging()
+
+    new = get_config()
+    changed = {k: new[k] for k in new if old.get(k) != new[k]}
+    if changed:
+        print(f"🔄 Config reloaded: {', '.join(changed.keys())}")
+    return changed
+
+
+def get_config():
+    """Return dict of current configuration values."""
+    return {
+        "WHISPER_MODEL": WHISPER_MODEL,
+        "WHISPER_LANGUAGE": WHISPER_LANGUAGE,
+        "WHISPER_INITIAL_PROMPT": WHISPER_INITIAL_PROMPT,
+        "HOTKEY": HOTKEY,
+        "USE_LLM_TRANSFORM": USE_LLM_TRANSFORM,
+        "LLM_BACKEND": LLM_BACKEND,
+        "LLM_MODEL": LLM_MODEL,
+        "LLM_URL": LLM_URL,
+        "LLM_API_KEY": LLM_API_KEY,
+        "COPY_TO_CLIPBOARD": COPY_TO_CLIPBOARD,
+        "PASTE_TO_ACTIVE_WINDOW": PASTE_TO_ACTIVE_WINDOW,
+        "CLIPBOARD_AFTER_PASTE_POLICY": CLIPBOARD_AFTER_PASTE_POLICY,
+        "KEYS_AFTER_PASTE": KEYS_AFTER_PASTE,
+        "SAMPLE_RATE": SAMPLE_RATE,
+        "CHUNK_SIZE": CHUNK_SIZE,
+        "PREBUFFER_SEC": PREBUFFER_SEC,
+        "PADDING_SEC": PADDING_SEC,
+        "MIN_FRAMES": MIN_FRAMES,
+        "SILENCE_AMPLITUDE": SILENCE_AMPLITUDE_THRESHOLD,
+        "CHUNK_DURATION_SEC": CHUNK_DURATION_SEC,
+        "CHUNK_OVERLAP_SEC": CHUNK_OVERLAP_SEC,
+        "LOG_ENABLED": LOG_ENABLED,
+        "SHOW_NOTIFICATIONS": SHOW_NOTIFICATIONS,
+    }
+
+
+def main():
+    """Console mode: init everything, register hotkeys, block forever."""
+    init_whisper()
+    init_audio()
 
     print(_format_banner())
-    print(f'👂 Listening — hold "{HOTKEY.upper()}" to start recording.')
+    print(f'👂 Listening - hold "{HOTKEY.upper()}" to start recording.')
 
+    # In console mode, use blocking listener (original behavior)
     _start_hotkey_listener_mac()
+
+
+def _start_hotkey_listener_mac():
+    """Blocking hotkey listener for console mode."""
+    try:
+        from pynput import keyboard as pynput_keyboard
+    except ImportError:
+        print("❌ pynput is required on macOS. Install with:")
+        print("   pip install pynput")
+        return
+
+    Key = pynput_keyboard.Key
+    pressed = set()
+
+    def _spec_from_name(name):
+        if not name:
+            return None
+        n = str(name).strip().lower()
+        if n in ("cmd", "command"):
+            return Key.cmd
+        if n in ("option", "opt", "alt"):
+            return Key.alt
+        if n in ("ctrl", "control"):
+            return Key.ctrl
+        if n == "shift":
+            return Key.shift
+        if n.startswith("f") and n[1:].isdigit():
+            return getattr(Key, n, None)
+        if len(n) == 1:
+            return n
+        return None
+
+    hotkey_key_spec = _spec_from_name(HOTKEY_KEY)
+    hotkey_mod_spec = _spec_from_name(HOTKEY_MODIFIER) if HOTKEY_MODIFIER else None
+
+    def _matches(key, spec):
+        if spec is None:
+            return False
+        if isinstance(spec, str):
+            return getattr(key, "char", None) == spec
+        return key == spec
+
+    def on_press(key):
+        pressed.add(key)
+        if HOTKEY_MODIFIER is None:
+            if _matches(key, hotkey_key_spec):
+                _on_hotkey_press()
+        else:
+            if _matches(key, hotkey_key_spec) and any(
+                _matches(k, hotkey_mod_spec) for k in pressed
+            ):
+                _on_hotkey_press()
+
+    def on_release(key):
+        if key == Key.esc:
+            print("\n👋 Exiting...")
+            return False
+        if HOTKEY_MODIFIER is None:
+            if _matches(key, hotkey_key_spec):
+                _on_hotkey_release()
+        else:
+            if _matches(key, hotkey_key_spec) or _matches(key, hotkey_mod_spec):
+                _on_hotkey_release()
+        pressed.discard(key)
+
+    with pynput_keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
+        listener.join()
 
 
 if __name__ == "__main__":

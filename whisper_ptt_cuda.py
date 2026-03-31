@@ -11,8 +11,10 @@ Optional: Ollama for LLM transform.
 
 import io
 import os
+import sys
 import wave
 import time
+import logging
 import threading
 import collections
 import keyboard
@@ -152,6 +154,40 @@ SILENCE_AMPLITUDE_THRESHOLD = _env("SILENCE_AMPLITUDE", "750", type_=int)
 CHUNK_DURATION_SEC = _env("CHUNK_DURATION_SEC", "15", type_=float)
 CHUNK_OVERLAP_SEC = _env("CHUNK_OVERLAP_SEC", "2.0", type_=float)
 
+# Logging
+LOG_ENABLED = _env("LOG_ENABLED", "false", type_=bool)
+SHOW_NOTIFICATIONS = _env("SHOW_NOTIFICATIONS", "true", type_=bool)
+LOG_FILE = _env("LOG_FILE", os.path.join(_script_dir, "whisper_ptt.log"))
+
+# Logger setup
+_logger = logging.getLogger("whisper_ptt")
+_logger.setLevel(logging.DEBUG)
+_log_handler = None
+
+
+def _setup_logging():
+    """Configure file logging if enabled. Idempotent."""
+    global _log_handler
+    if _log_handler:
+        return
+    if not LOG_ENABLED:
+        _logger.addHandler(logging.NullHandler())
+        return
+    _log_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    _log_handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    ))
+    _logger.addHandler(_log_handler)
+    _logger.info("--- Logging started (pid=%d) ---", os.getpid())
+
+
+_setup_logging()
+
+
+def get_log_path():
+    """Return the log file path."""
+    return LOG_FILE
+
 
 # -----------------------------------------------------------------------------
 # Windows: add CUDA DLL path (nvidia.* packages)
@@ -182,6 +218,7 @@ _audio_frames = []
 _prebuffer_deque = None
 _prebuffer_lock = threading.Lock()
 _prebuffer_running = True
+_prebuffer_thread = None
 _pyaudio_instance = None
 _whisper_model = None
 
@@ -193,6 +230,34 @@ _next_chunk_frame = 0          # frame index where next chunk starts
 _chunking_active = False
 _prev_chunk_tail_text = ""     # last ~30 words for initial_prompt context
 _pending_chunk_threads = []
+
+# GUI callbacks (optional — None in console mode)
+_audio_level_callback = None   # fn(peak: float) called from prebuffer thread
+_event_callback = None         # fn(event: str, data: dict) called from various threads
+
+
+def set_audio_level_callback(fn):
+    """Register callback for audio level updates. fn(peak_amplitude: float)."""
+    global _audio_level_callback
+    _audio_level_callback = fn
+
+
+def set_event_callback(fn):
+    """Register callback for events. fn(event: str, data: dict).
+    Events: recording_started, recording_stopped, processing_started,
+            transcription_done, error."""
+    global _event_callback
+    _event_callback = fn
+
+
+def _fire_event(event, data=None):
+    """Fire event callback if registered."""
+    cb = _event_callback
+    if cb:
+        try:
+            cb(event, data or {})
+        except Exception:
+            pass
 
 
 def _prebuffer_size():
@@ -253,6 +318,15 @@ def prebuffer_worker():
         except Exception as e:
             print(f"⚠️  Unexpected mic error: {e} — stopping prebuffer.")
             break
+        # Compute audio level OUTSIDE lock to avoid contention
+        level_cb = _audio_level_callback
+        if level_cb:
+            try:
+                audio_int16 = np.frombuffer(chunk, dtype=np.int16)
+                peak = float(np.max(np.abs(audio_int16))) if audio_int16.size > 0 else 0.0
+                level_cb(peak)
+            except Exception:
+                pass
         with _prebuffer_lock:
             _prebuffer_deque.append(chunk)
             if _recording:
@@ -277,6 +351,8 @@ def start_recording():
         _audio_frames[:] = list(_prebuffer_deque)
     _recording = True
     print("🎙️ Recording...")
+    _logger.info("Recording started")
+    _fire_event("recording_started")
 
 
 def frames_to_wav(frames, prepend_silence_sec=0):
@@ -376,7 +452,9 @@ def transcribe(wav_buffer):
         vad_parameters=dict(min_silence_duration_ms=500),
     )
     text = " ".join(seg.text.strip() for seg in segments).strip()
-    print(f"📝 Whisper ({time.time() - t0:.1f}s): {text}")
+    elapsed = time.time() - t0
+    print(f"📝 Whisper ({elapsed:.1f}s): {text}")
+    _logger.info("Whisper %.1fs: %s", elapsed, text)
     return text, info.language
 
 
@@ -392,7 +470,9 @@ def _transcribe_chunk(wav_buffer, initial_prompt):
         vad_parameters=dict(min_silence_duration_ms=500),
     )
     text = " ".join(seg.text.strip() for seg in segments).strip()
-    print(f"   📝 Chunk ({time.time() - t0:.1f}s): {text[:80]}{'...' if len(text) > 80 else ''}")
+    elapsed = time.time() - t0
+    print(f"   📝 Chunk ({elapsed:.1f}s): {text[:80]}{'...' if len(text) > 80 else ''}")
+    _logger.info("Chunk %.1fs: %s", elapsed, text[:120])
     return text, info.language
 
 
@@ -443,10 +523,13 @@ def transform_with_llm(raw_text, detected_lang):
             result = _llm_request_openai(prompt)
         else:
             result = _llm_request_ollama(prompt)
-        print(f"✨ LLM ({time.time() - t0:.1f}s): {result}")
+        elapsed = time.time() - t0
+        print(f"✨ LLM ({elapsed:.1f}s): {result}")
+        _logger.info("LLM %s %.1fs: %s", LLM_BACKEND, elapsed, result)
         return result
     except Exception as e:
         print(f"❌ LLM error: {e}, using raw text")
+        _logger.error("LLM error: %s", e)
         return raw_text
 
 
@@ -487,19 +570,19 @@ def _get_foreground_process_name():
         kernel32.CloseHandle(handle)
 
 
-def _resolve_paste_method():
-    """Return the actual paste keystroke string for the current foreground window."""
+def _resolve_paste_method(saved_fg_process=""):
+    """Return the actual paste keystroke string. Uses saved process name if available."""
     if PASTE_METHOD != "auto":
         return PASTE_METHOD
-    proc = _get_foreground_process_name()
+    proc = saved_fg_process or _get_foreground_process_name()
     if proc in _TERMINAL_PROCESSES:
         return "ctrl+shift+v"
     return "ctrl+v"
 
 
-def _send_paste():
+def _send_paste(method=None):
     """Send paste keystroke via keyboard lib."""
-    method = _resolve_paste_method()
+    method = method or _resolve_paste_method()
     if method == "ctrl+shift+v":
         keyboard.send("ctrl+shift+v")
     elif method == "shift+insert":
@@ -513,13 +596,14 @@ def _send_keys_after():
     keyboard.send(KEYS_AFTER_PASTE)
 
 
-def paste_to_front(text):
+def paste_to_front(text, saved_fg_process=""):
     """Copy to clipboard and/or paste to active window via SendInput."""
     if not text.strip():
         print("❌ Empty text, skipping")
         return
     if not COPY_TO_CLIPBOARD and not PASTE_TO_ACTIVE_WINDOW:
         print("✅ Done (console only)")
+        _fire_event("transcription_done", {"text": text})
         return
     old = pyperclip.paste()
     pyperclip.copy(text)
@@ -528,20 +612,22 @@ def paste_to_front(text):
         import winsound
         winsound.MessageBeep(winsound.MB_OK)
     if PASTE_TO_ACTIVE_WINDOW:
-        actual_method = _resolve_paste_method()
-        _send_paste()
+        actual_method = _resolve_paste_method(saved_fg_process)
+        _send_paste(actual_method)
         time.sleep(0.15)
         if KEYS_AFTER_PASTE:
             time.sleep(0.05)
             _send_keys_after()
         suffix = f' + "{KEYS_AFTER_PASTE.upper()}"' if KEYS_AFTER_PASTE else ""
         print(f"✅ Pasted ({actual_method}){suffix}!")
+        _logger.info("Pasted (%s): %s", actual_method, text[:120])
         # Wait for paste to complete before touching clipboard
         time.sleep(0.3)
         if CLIPBOARD_AFTER_PASTE_POLICY == "restore":
             pyperclip.copy(old)
         elif CLIPBOARD_AFTER_PASTE_POLICY == "clear":
             pyperclip.copy("")
+    _fire_event("transcription_done", {"text": text})
 
 
 # -----------------------------------------------------------------------------
@@ -633,7 +719,7 @@ def _extract_final_chunk(frames):
     _submit_chunk_for_transcription(idx, remaining, initial_prompt)
 
 
-def _assemble_and_output():
+def _assemble_and_output(fg_process=""):
     """Wait for all chunk transcriptions, stitch, LLM, paste."""
     for t in _pending_chunk_threads:
         t.join(timeout=60)
@@ -649,7 +735,7 @@ def _assemble_and_output():
     else:
         final_text = stitched
 
-    paste_to_front(final_text)
+    paste_to_front(final_text, saved_fg_process=fg_process)
     _reset_chunk_state()
 
 
@@ -657,15 +743,15 @@ def _assemble_and_output():
 # Process recording (background thread)
 # -----------------------------------------------------------------------------
 
-def _process_recorded_frames(frames):
-    """Pipeline: frames → WAV → Whisper → optional LLM → paste."""
+def _process_recorded_frames(frames, fg_process=""):
+    """Pipeline: frames -> WAV -> Whisper -> optional LLM -> paste."""
     wav = frames_to_wav(frames, prepend_silence_sec=PADDING_SEC)
     raw_text, lang = transcribe(wav)
     if USE_LLM_TRANSFORM and raw_text.strip():
         final_text = transform_with_llm(raw_text, lang)
     else:
         final_text = raw_text
-    paste_to_front(final_text)
+    paste_to_front(final_text, saved_fg_process=fg_process)
 
 
 def stop_recording_and_process():
@@ -674,15 +760,21 @@ def stop_recording_and_process():
     if not _recording:
         return
     _recording = False
+    # Capture foreground window NOW (before processing delay changes focus)
+    fg_process = _get_foreground_process_name() if os.name == "nt" else ""
+    _fire_event("recording_stopped")
     time.sleep(0.15)
 
-    frames = list(_audio_frames)
+    with _prebuffer_lock:
+        frames = list(_audio_frames)
     duration_sec = len(frames) * CHUNK_SIZE / SAMPLE_RATE
     print(f"⏹️ Recorded {duration_sec:.1f}s (with {PREBUFFER_SEC}s prebuffer)")
+    _logger.info("Recorded %.1fs", duration_sec)
 
     # Only process recordings longer than 0.7 seconds in total.
     if duration_sec <= 0.7 or len(frames) < MIN_FRAMES:
         print("❌ Recording too short")
+        _logger.info("Skipped: too short (%.1fs)", duration_sec)
         _reset_chunk_state()
         return
 
@@ -691,17 +783,20 @@ def stop_recording_and_process():
     audio_int16 = np.frombuffer(raw, dtype=np.int16)
     if audio_int16.size == 0 or np.max(np.abs(audio_int16)) < SILENCE_AMPLITUDE_THRESHOLD:
         print("❌ Audio too quiet / silence, skipping")
+        _logger.info("Skipped: silence")
         _reset_chunk_state()
         return
 
+    _fire_event("processing_started")
+
     if not _chunking_active:
-        # Short recording — single-pass (existing behavior)
+        # Short recording - single-pass (existing behavior)
         _reset_chunk_state()
-        threading.Thread(target=_process_recorded_frames, args=(frames,), daemon=True).start()
+        threading.Thread(target=_process_recorded_frames, args=(frames, fg_process), daemon=True).start()
     else:
-        # Long recording — extract final chunk and assemble all
+        # Long recording - extract final chunk and assemble all
         _extract_final_chunk(frames)
-        threading.Thread(target=_assemble_and_output, daemon=True).start()
+        threading.Thread(target=_assemble_and_output, args=(fg_process,), daemon=True).start()
 
 
 # -----------------------------------------------------------------------------
@@ -740,9 +835,13 @@ def _format_banner():
     return "".join(parts)
 
 
-def main():
-    global _pyaudio_instance, _whisper_model, _prebuffer_deque
+# -----------------------------------------------------------------------------
+# Init / shutdown / config API (used by GUI; console mode calls main())
+# -----------------------------------------------------------------------------
 
+def init_whisper():
+    """Load the Whisper model. Blocking, may take a while on first run (download)."""
+    global _whisper_model
     print("⏳ Loading Whisper model... (first run may download the model)")
     _whisper_model = WhisperModel(
         WHISPER_MODEL,
@@ -751,26 +850,158 @@ def main():
     )
     print("✅ Whisper loaded!")
 
+
+def init_audio():
+    """Initialize PyAudio, prebuffer deque, and start prebuffer worker thread."""
+    global _pyaudio_instance, _prebuffer_deque, _prebuffer_running, _prebuffer_thread
+    _prebuffer_running = True
     _pyaudio_instance = pyaudio.PyAudio()
     _prebuffer_deque = collections.deque(maxlen=_prebuffer_size())
-
     print(f"🎧 Prebuffer active (last {PREBUFFER_SEC}s)")
-    threading.Thread(target=prebuffer_worker, daemon=True).start()
+    _prebuffer_thread = threading.Thread(target=prebuffer_worker, daemon=True)
+    _prebuffer_thread.start()
 
-    print(_format_banner())
-    print(f'👂 Listening — hold "{HOTKEY.upper()}" to start recording.')
 
-    # Suppress the hotkey so the OS doesn't process it (e.g. Alt opening menus, Pause freezing terminal)
+def register_hotkeys():
+    """Register keyboard hotkey hooks for push-to-talk."""
     _suppress = HOTKEY_KEY in ("alt", "pause")
     keyboard.on_press_key(HOTKEY_KEY, _on_hotkey_press, suppress=_suppress)
     keyboard.on_release_key(HOTKEY_KEY, _on_hotkey_release, suppress=_suppress)
 
-    # Block forever — exit only via Ctrl+C
+
+def unregister_hotkeys():
+    """Remove keyboard hotkey hooks."""
+    try:
+        keyboard.unhook_all()
+    except Exception:
+        pass
+
+
+def shutdown():
+    """Stop prebuffer worker, terminate PyAudio. Call before exit."""
+    global _prebuffer_running
+    _prebuffer_running = False
+    if _prebuffer_thread and _prebuffer_thread.is_alive():
+        _prebuffer_thread.join(timeout=3)
+    if _pyaudio_instance:
+        try:
+            _pyaudio_instance.terminate()
+        except Exception:
+            pass
+
+
+def reload_config():
+    """Re-read .env and update module globals. Returns dict of changed keys.
+    Some settings require restart: WHISPER_MODEL (model reload), SAMPLE_RATE/CHUNK_SIZE (audio restart)."""
+    global WHISPER_LANGUAGE, WHISPER_INITIAL_PROMPT
+    global USE_LLM_TRANSFORM, LLM_BACKEND, LLM_MODEL, LLM_URL, LLM_API_KEY, LLM_TRANSFORM_PROMPT
+    global COPY_TO_CLIPBOARD, PASTE_TO_ACTIVE_WINDOW, PASTE_METHOD
+    global CLIPBOARD_AFTER_PASTE_POLICY, KEYS_AFTER_PASTE
+    global PREBUFFER_SEC, PADDING_SEC, MIN_FRAMES, SILENCE_AMPLITUDE_THRESHOLD
+    global CHUNK_DURATION_SEC, CHUNK_OVERLAP_SEC
+    global SHOW_NOTIFICATIONS, LOG_ENABLED, _log_handler
+
+    # Re-read .env
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(_env_path, override=True)
+    except ImportError:
+        pass
+
+    old = get_config()
+
+    # Instant-apply settings
+    WHISPER_LANGUAGE = _env("WHISPER_LANGUAGE", "en")
+    WHISPER_INITIAL_PROMPT = _env("WHISPER_INITIAL_PROMPT", "English speech.")
+    USE_LLM_TRANSFORM = _env("USE_LLM_TRANSFORM", "false", type_=bool)
+    LLM_BACKEND = _env("LLM_BACKEND", "ollama").strip().lower()
+    LLM_MODEL = _env("LLM_MODEL", _env("OLLAMA_MODEL", "gemma3:12b"))
+    LLM_URL = _env("LLM_URL", _env("OLLAMA_URL",
+        "http://localhost:11434/api/generate" if LLM_BACKEND == "ollama"
+        else "http://localhost:1234/v1/chat/completions"))
+    LLM_API_KEY = _env("LLM_API_KEY", "")
+    LLM_TRANSFORM_PROMPT = _get_llm_prompt()
+    COPY_TO_CLIPBOARD = _env("COPY_TO_CLIPBOARD", "true", type_=bool)
+    PASTE_TO_ACTIVE_WINDOW = _env("PASTE_TO_ACTIVE_WINDOW", "true", type_=bool)
+    PASTE_METHOD = _env("PASTE_METHOD", "auto").strip().lower()
+    CLIPBOARD_AFTER_PASTE_POLICY = _env("CLIPBOARD_AFTER_PASTE_POLICY", "restore").strip().lower()
+    KEYS_AFTER_PASTE = _env("KEYS_AFTER_PASTE", "enter").strip().lower()
+    if KEYS_AFTER_PASTE in ("", "none"):
+        KEYS_AFTER_PASTE = None
+    PREBUFFER_SEC = _env("PREBUFFER_SEC", "0.5", type_=float)
+    PADDING_SEC = _env("PADDING_SEC", "0.2", type_=float)
+    MIN_FRAMES = _env("MIN_FRAMES", "5", type_=int)
+    SILENCE_AMPLITUDE_THRESHOLD = _env("SILENCE_AMPLITUDE", "750", type_=int)
+    CHUNK_DURATION_SEC = _env("CHUNK_DURATION_SEC", "15", type_=float)
+    CHUNK_OVERLAP_SEC = _env("CHUNK_OVERLAP_SEC", "2.0", type_=float)
+
+    SHOW_NOTIFICATIONS = _env("SHOW_NOTIFICATIONS", "true", type_=bool)
+    new_log = _env("LOG_ENABLED", "false", type_=bool)
+    if new_log != LOG_ENABLED:
+        LOG_ENABLED = new_log
+        for h in list(_logger.handlers):
+            _logger.removeHandler(h)
+        if _log_handler:
+            _log_handler.close()
+            _log_handler = None
+        _setup_logging()
+
+    new = get_config()
+    changed = {k: new[k] for k in new if old.get(k) != new[k]}
+    if changed:
+        print(f"🔄 Config reloaded: {', '.join(changed.keys())}")
+    return changed
+
+
+def get_config():
+    """Return dict of current configuration values."""
+    return {
+        "WHISPER_MODEL": WHISPER_MODEL,
+        "WHISPER_LANGUAGE": WHISPER_LANGUAGE,
+        "WHISPER_INITIAL_PROMPT": WHISPER_INITIAL_PROMPT,
+        "HOTKEY": HOTKEY,
+        "USE_LLM_TRANSFORM": USE_LLM_TRANSFORM,
+        "LLM_BACKEND": LLM_BACKEND,
+        "LLM_MODEL": LLM_MODEL,
+        "LLM_URL": LLM_URL,
+        "LLM_API_KEY": LLM_API_KEY,
+        "COPY_TO_CLIPBOARD": COPY_TO_CLIPBOARD,
+        "PASTE_TO_ACTIVE_WINDOW": PASTE_TO_ACTIVE_WINDOW,
+        "PASTE_METHOD": PASTE_METHOD,
+        "CLIPBOARD_AFTER_PASTE_POLICY": CLIPBOARD_AFTER_PASTE_POLICY,
+        "KEYS_AFTER_PASTE": KEYS_AFTER_PASTE,
+        "SAMPLE_RATE": SAMPLE_RATE,
+        "CHUNK_SIZE": CHUNK_SIZE,
+        "PREBUFFER_SEC": PREBUFFER_SEC,
+        "PADDING_SEC": PADDING_SEC,
+        "MIN_FRAMES": MIN_FRAMES,
+        "SILENCE_AMPLITUDE": SILENCE_AMPLITUDE_THRESHOLD,
+        "CHUNK_DURATION_SEC": CHUNK_DURATION_SEC,
+        "CHUNK_OVERLAP_SEC": CHUNK_OVERLAP_SEC,
+        "LOG_ENABLED": LOG_ENABLED,
+        "SHOW_NOTIFICATIONS": SHOW_NOTIFICATIONS,
+    }
+
+
+def main():
+    """Console mode: init everything, register hotkeys, block forever."""
+    init_whisper()
+    init_audio()
+
+    print(_format_banner())
+    print(f'👂 Listening - hold "{HOTKEY.upper()}" to start recording.')
+
+    register_hotkeys()
+
+    # Block forever - exit only via Ctrl+C
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
         pass
+    finally:
+        unregister_hotkeys()
+        shutdown()
 
 
 if __name__ == "__main__":
