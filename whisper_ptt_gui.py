@@ -354,7 +354,7 @@ def _set_autostart(enabled):
                     if not os.path.isfile(pythonw):
                         pythonw = sys.executable
                     gui_script = os.path.join(_script_dir, "whisper_ptt_gui.py")
-                    cmd = f'"{pythonw}" "{gui_script}"'
+                    cmd = f'"{pythonw}" "{gui_script}" --autostart'
                     winreg.SetValueEx(key, _AUTOSTART_NAME, 0, winreg.REG_SZ, cmd)
                 else:
                     try:
@@ -637,6 +637,9 @@ class WhisperPTTApp:
         log_action = QAction("Open Log", menu)
         log_action.triggered.connect(self._open_log)
         menu.addAction(log_action)
+        reregister_action = QAction("Re-register hotkeys", menu)
+        reregister_action.triggered.connect(self._reregister_hotkeys)
+        menu.addAction(reregister_action)
         menu.addSeparator()
         quit_action = QAction("Quit", menu)
         quit_action.triggered.connect(self._quit)
@@ -699,6 +702,20 @@ class WhisperPTTApp:
         else:
             subprocess.Popen(["xdg-open", log_path])
 
+    def _reregister_hotkeys(self):
+        """Unregister and re-register keyboard hotkeys."""
+        try:
+            core.unregister_hotkeys()
+            core.register_hotkeys()
+            hotkey = core.HOTKEY.upper()
+            self._tray.showMessage(
+                "Whisper PTT", f"Hotkeys re-registered ({hotkey})",
+                QSystemTrayIcon.MessageIcon.Information, 2000)
+        except Exception as e:
+            self._tray.showMessage(
+                "Whisper PTT - Error", f"Failed to re-register hotkeys: {e}",
+                QSystemTrayIcon.MessageIcon.Critical, 3000)
+
     def _show_settings(self):
         if self._settings_dialog and self._settings_dialog.isVisible():
             self._settings_dialog.activateWindow()
@@ -749,7 +766,38 @@ class _CoreInitReceiver(QObject):
         print(f"Ready! Hold {hotkey} to record.")
 
 
+def _acquire_single_instance():
+    """Ensure only one instance is running. Returns mutex handle or exits."""
+    if sys.platform == "win32":
+        import ctypes
+        mutex = ctypes.windll.kernel32.CreateMutexW(None, True, "WhisperPTT_SingleInstance")
+        ERROR_ALREADY_EXISTS = 183
+        if ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+            return None
+        return mutex
+    return True
+
+
 def main():
+    mutex = _acquire_single_instance()
+    if mutex is None:
+        print("Another instance is already running.")
+        sys.exit(0)
+
+    # Autostart delay: when launched from Windows startup (registry),
+    # keyboard hooks registered too early don't receive events because
+    # the desktop isn't fully initialized yet. Wait before starting.
+    if "--autostart" in sys.argv:
+        delay = 5
+        for arg in sys.argv:
+            if arg.startswith("--autostart-delay="):
+                try:
+                    delay = int(arg.split("=", 1)[1])
+                except ValueError:
+                    pass
+        if delay > 0:
+            time.sleep(delay)
+
     app = WhisperPTTApp()
     sys.exit(app.run())
 
