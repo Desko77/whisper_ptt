@@ -119,6 +119,19 @@ The GUI runs as a system tray application with:
 - **Autostart** - "Start with Windows" option in settings
 - **Re-register hotkeys** - tray menu option if hotkeys stop working
 
+### Settings dialog
+
+| | |
+|---|---|
+| ![Whisper](docs/images/settings-whisper.png) | ![Hotkey](docs/images/settings-hotkey.png) |
+| **Whisper** - model, language, initial prompt | **Hotkey** - push-to-talk key |
+| ![LLM](docs/images/settings-llm.png) | ![Output](docs/images/settings-output.png) |
+| **LLM** - backend, model, URL, API key | **Output** - clipboard, paste method, keys after paste |
+| ![Audio](docs/images/settings-audio.png) | ![Chunking](docs/images/settings-chunking.png) |
+| **Audio** - sample rate, chunk size, prebuffer, silence threshold | **Chunking** - chunk duration and overlap for long recordings |
+| ![General](docs/images/settings-general.png) | |
+| **General** - notifications, logging, autostart | |
+
 ---
 
 ## Configuration
