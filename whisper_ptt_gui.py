@@ -668,6 +668,7 @@ class WhisperPTTApp:
 
     @Slot()
     def _on_recording_stopped(self):
+        self._set_state("idle")
         self._overlay.hide_overlay()
 
     @Slot()
