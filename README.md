@@ -21,6 +21,7 @@ Hold a hotkey, speak, release. Transcribed text is pasted into the active window
 - **Windows autostart** - launch at login with startup delay for reliable hotkey registration
 - **Single instance** - prevents duplicate processes
 - **Logging** - optional file logging for diagnostics
+- **Microphone selection** - choose input device from GUI (hot-swap without restart)
 - **Fully configurable** - all settings via `.env` file or GUI settings dialog
 
 ---
@@ -112,7 +113,7 @@ The default prompt cleans up grammar and filler words. A separate Russian prompt
 
 The GUI runs as a system tray application with:
 
-- **Tray icon** - changes color based on state (loading/idle/recording/processing)
+- **Tray icon** - changes color based on state (blue=loading, green=ready, red=recording, orange=processing)
 - **Recording overlay** - translucent waveform indicator, draggable
 - **Settings dialog** - all configuration in one place, organized by category
 - **Notifications** - balloon notifications with transcribed text
@@ -128,7 +129,7 @@ The GUI runs as a system tray application with:
 | ![LLM](docs/images/settings-llm.png) | ![Output](docs/images/settings-output.png) |
 | **LLM** - backend, model, URL, API key | **Output** - clipboard, paste method, keys after paste |
 | ![Audio](docs/images/settings-audio.png) | ![Chunking](docs/images/settings-chunking.png) |
-| **Audio** - sample rate, chunk size, prebuffer, silence threshold | **Chunking** - chunk duration and overlap for long recordings |
+| **Audio** - microphone, sample rate, chunk size, prebuffer, silence threshold | **Chunking** - chunk duration and overlap for long recordings |
 | ![General](docs/images/settings-general.png) | |
 | **General** - notifications, logging, autostart | |
 
@@ -147,6 +148,7 @@ All settings are read from `WHISPER_PTT_*` environment variables, a `.env` file,
 | `WHISPER_PTT_LLM_BACKEND` | LLM backend: `ollama` or `openai` (LM Studio, llama.cpp) | `ollama` |
 | `WHISPER_PTT_LLM_MODEL` | LLM model name | `gemma3:12b` |
 | `WHISPER_PTT_LLM_URL` | LLM API URL | auto by backend |
+| `WHISPER_PTT_AUDIO_DEVICE` | Microphone: `default` or device name substring (e.g. `Realtek`) | `default` |
 | `WHISPER_PTT_COPY_TO_CLIPBOARD` | Copy result to clipboard | `true` |
 | `WHISPER_PTT_PASTE_TO_ACTIVE_WINDOW` | Paste into focused window | `true` |
 | `WHISPER_PTT_PASTE_METHOD` | Paste method: `auto`, `ctrl+v`, `ctrl+shift+v`, `shift+insert` | `auto` |

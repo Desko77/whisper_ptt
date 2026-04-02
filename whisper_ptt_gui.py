@@ -397,6 +397,9 @@ class SettingsDialog(QDialog):
             "en", "ru", "de", "fr", "es", "it", "pt", "ja", "ko", "zh",
         ])
         self._add_text(wf, "WHISPER_INITIAL_PROMPT", "Initial prompt:")
+        self._add_spin(wf, "WHISPER_NO_REPEAT_NGRAM_SIZE", "No-repeat ngram size:", 0, 10, 1)
+        self._add_dspin(wf, "WHISPER_REPETITION_PENALTY", "Repetition penalty:", 1.0, 2.0, 0.05)
+        self._add_dspin(wf, "WHISPER_HALLUCINATION_SILENCE_THRESHOLD", "Hallucination silence (sec):", 0.0, 10.0, 0.5)
         tabs.addTab(whisper_tab, "Whisper")
 
         # Hotkey tab
@@ -432,6 +435,7 @@ class SettingsDialog(QDialog):
         # Audio tab
         audio_tab = QWidget()
         af = QFormLayout(audio_tab)
+        self._add_mic_combo(af)
         self._add_spin(af, "SAMPLE_RATE", "Sample rate:", 8000, 48000, 1000)
         self._add_spin(af, "CHUNK_SIZE", "Chunk size:", 256, 8192, 256)
         self._add_dspin(af, "PREBUFFER_SEC", "Prebuffer (sec):", 0.0, 5.0, 0.1)
@@ -470,6 +474,27 @@ class SettingsDialog(QDialog):
         btn_layout.addWidget(apply_btn)
         btn_layout.addWidget(cancel_btn)
         layout.addLayout(btn_layout)
+
+    def _add_mic_combo(self, form):
+        w = QComboBox()
+        devices = core.list_audio_devices()
+        w.addItem("Default (system)", "default")
+        for dev in devices:
+            label = dev["name"]
+            if dev["is_default"]:
+                label += " [system default]"
+            w.addItem(label, dev["name"])
+        # Select current
+        current = core.get_config().get("AUDIO_DEVICE", "default")
+        if not current or current.lower() == "default":
+            w.setCurrentIndex(0)
+        else:
+            for i in range(1, w.count()):
+                if current.lower() in w.itemData(i).lower():
+                    w.setCurrentIndex(i)
+                    break
+        self._widgets["AUDIO_DEVICE"] = w
+        form.addRow("Microphone:", w)
 
     def _add_text(self, form, key, label, password=False):
         w = QLineEdit()
@@ -522,6 +547,8 @@ class SettingsDialog(QDialog):
         # AUTOSTART is not in core config, read from registry
         cfg["AUTOSTART"] = _get_autostart()
         for key, widget in self._widgets.items():
+            if key == "AUDIO_DEVICE":
+                continue  # already set in _add_mic_combo
             val = cfg.get(key, "")
             if isinstance(widget, QCheckBox):
                 widget.setChecked(val is True)
@@ -541,6 +568,8 @@ class SettingsDialog(QDialog):
         for key, widget in self._widgets.items():
             if isinstance(widget, QCheckBox):
                 result[key] = widget.isChecked()
+            elif key == "AUDIO_DEVICE":
+                result[key] = widget.currentData() or "default"
             elif isinstance(widget, QComboBox):
                 result[key] = widget.currentText()
             elif isinstance(widget, (QSpinBox, QDoubleSpinBox)):
@@ -575,6 +604,10 @@ class SettingsDialog(QDialog):
 
         # Reload config in core
         changed = core.reload_config()
+
+        # Hot-swap microphone if changed
+        if "AUDIO_DEVICE" in changed:
+            core.switch_microphone(changed["AUDIO_DEVICE"])
 
         # Check if restart-requiring settings changed
         restart_needed = set(changed.keys()) & self.RESTART_KEYS
