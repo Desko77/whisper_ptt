@@ -119,8 +119,8 @@ class AudioBridge(QObject):
 class RecordingOverlay(QWidget):
     """Floating overlay showing audio waveform during recording."""
 
-    WIDTH = 400
-    HEIGHT = 80
+    WIDTH = 340
+    HEIGHT = 70
 
     def __init__(self, bridge):
         super().__init__()
@@ -252,13 +252,13 @@ class RecordingOverlay(QWidget):
             path.moveTo(wave_left, wave_mid)
             for i, val in enumerate(points):
                 x = wave_left + i * step
-                y = wave_mid - val * (wave_height / 2) * 0.9
+                y = wave_mid - val * (wave_height / 2) * 1.62
                 path.lineTo(x, y)
 
             # Bottom half (mirror)
             for i in range(n - 1, -1, -1):
                 x = wave_left + i * step
-                y = wave_mid + points[i] * (wave_height / 2) * 0.9
+                y = wave_mid + points[i] * (wave_height / 2) * 1.62
                 path.lineTo(x, y)
 
             path.closeSubpath()
@@ -276,7 +276,7 @@ class RecordingOverlay(QWidget):
             stroke_path.moveTo(wave_left, wave_mid)
             for i, val in enumerate(points):
                 x = wave_left + i * step
-                y = wave_mid - val * (wave_height / 2) * 0.9
+                y = wave_mid - val * (wave_height / 2) * 1.62
                 stroke_path.lineTo(x, y)
             p.drawPath(stroke_path)
 
@@ -285,7 +285,7 @@ class RecordingOverlay(QWidget):
             stroke_bot.moveTo(wave_left, wave_mid)
             for i, val in enumerate(points):
                 x = wave_left + i * step
-                y = wave_mid + val * (wave_height / 2) * 0.9
+                y = wave_mid + val * (wave_height / 2) * 1.62
                 stroke_bot.lineTo(x, y)
             p.drawPath(stroke_bot)
         else:
