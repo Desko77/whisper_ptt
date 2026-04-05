@@ -91,6 +91,9 @@ LLM_URL = _env("LLM_URL", _env("OLLAMA_URL",
     "http://localhost:11434/api/generate" if LLM_BACKEND == "ollama"
     else "http://localhost:1234/v1/chat/completions"))
 LLM_API_KEY = _env("LLM_API_KEY", "")
+# Reasoning/thinking control for models that support it (e.g. Gemma 4).
+# "none" = disable thinking (fast), "low"/"medium"/"high" = enable with budget.
+LLM_REASONING_EFFORT = _env("LLM_REASONING_EFFORT", "none").strip().lower()
 DEFAULT_LLM_TRANSFORM_PROMPT_RU = """Исправь следующую расшифровку речи. Правила:
 - Исправь пунктуацию, заглавные буквы и явные грамматические ошибки
 - Убери слова-паразиты (эм, ну, типа, вот, короче и т.д.)
@@ -600,18 +603,16 @@ def _llm_request_openai(prompt):
     headers = {"Content-Type": "application/json"}
     if LLM_API_KEY:
         headers["Authorization"] = f"Bearer {LLM_API_KEY}"
-    r = requests.post(
-        LLM_URL,
-        headers=headers,
-        json={
-            "model": LLM_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.1,
-            "max_tokens": len(prompt) * 2,
-            "stream": False,
-        },
-        timeout=30,
-    )
+    body = {
+        "model": LLM_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.1,
+        "max_tokens": len(prompt) * 2,
+        "stream": False,
+    }
+    if LLM_REASONING_EFFORT != "off":
+        body["reasoning_effort"] = LLM_REASONING_EFFORT
+    r = requests.post(LLM_URL, headers=headers, json=body, timeout=30)
     return r.json()["choices"][0]["message"]["content"].strip()
 
 
@@ -1081,7 +1082,7 @@ def reload_config():
     """Re-read .env and update module globals. Returns dict of changed keys.
     Some settings require restart: WHISPER_MODEL (model reload), SAMPLE_RATE/CHUNK_SIZE (audio restart)."""
     global WHISPER_LANGUAGE, WHISPER_INITIAL_PROMPT
-    global USE_LLM_TRANSFORM, LLM_BACKEND, LLM_MODEL, LLM_URL, LLM_API_KEY, LLM_TRANSFORM_PROMPT
+    global USE_LLM_TRANSFORM, LLM_BACKEND, LLM_MODEL, LLM_URL, LLM_API_KEY, LLM_REASONING_EFFORT, LLM_TRANSFORM_PROMPT
     global COPY_TO_CLIPBOARD, PASTE_TO_ACTIVE_WINDOW, PASTE_METHOD
     global CLIPBOARD_AFTER_PASTE_POLICY, KEYS_AFTER_PASTE
     global PREBUFFER_SEC, PADDING_SEC, MIN_FRAMES, SILENCE_AMPLITUDE_THRESHOLD
@@ -1108,6 +1109,7 @@ def reload_config():
         "http://localhost:11434/api/generate" if LLM_BACKEND == "ollama"
         else "http://localhost:1234/v1/chat/completions"))
     LLM_API_KEY = _env("LLM_API_KEY", "")
+    LLM_REASONING_EFFORT = _env("LLM_REASONING_EFFORT", "none").strip().lower()
     LLM_TRANSFORM_PROMPT = _get_llm_prompt()
     COPY_TO_CLIPBOARD = _env("COPY_TO_CLIPBOARD", "true", type_=bool)
     PASTE_TO_ACTIVE_WINDOW = _env("PASTE_TO_ACTIVE_WINDOW", "true", type_=bool)
@@ -1157,6 +1159,7 @@ def get_config():
         "LLM_MODEL": LLM_MODEL,
         "LLM_URL": LLM_URL,
         "LLM_API_KEY": LLM_API_KEY,
+        "LLM_REASONING_EFFORT": LLM_REASONING_EFFORT,
         "COPY_TO_CLIPBOARD": COPY_TO_CLIPBOARD,
         "PASTE_TO_ACTIVE_WINDOW": PASTE_TO_ACTIVE_WINDOW,
         "PASTE_METHOD": PASTE_METHOD,

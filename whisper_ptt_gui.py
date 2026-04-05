@@ -416,6 +416,7 @@ class SettingsDialog(QDialog):
         self._add_text(lf, "LLM_MODEL", "Model:")
         self._add_text(lf, "LLM_URL", "URL:")
         self._add_text(lf, "LLM_API_KEY", "API Key:", password=True)
+        self._add_combo(lf, "LLM_REASONING_EFFORT", "Reasoning:", ["none", "low", "medium", "high", "off"])
         tabs.addTab(llm_tab, "LLM")
 
         # Output tab
