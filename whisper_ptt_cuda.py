@@ -130,7 +130,18 @@ LLM_TRANSFORM_PROMPT = _get_llm_prompt()
 # SpellCheck: hotkey to capture selected text, fix via LLM, paste back
 SPELLCHECK_ENABLED = _env("SPELLCHECK_ENABLED", "true", type_=bool)
 SPELLCHECK_HOTKEY = _env("SPELLCHECK_HOTKEY", "ctrl+t").strip().lower().replace(" ", "")
+# Parse spellcheck combo (e.g. "ctrl+t" -> ("ctrl", "t"))
+if "+" in SPELLCHECK_HOTKEY:
+    _sc_parts = SPELLCHECK_HOTKEY.split("+", 1)
+    SPELLCHECK_MODIFIER, SPELLCHECK_KEY = _sc_parts[0].strip(), _sc_parts[1].strip()
+else:
+    SPELLCHECK_MODIFIER, SPELLCHECK_KEY = None, SPELLCHECK_HOTKEY
 SPELLCHECK_LANGUAGE = _env("SPELLCHECK_LANGUAGE", "auto").strip().lower()
+# Replace profanity/obscene language with neutral equivalents
+SPELLCHECK_CLEAN_PROFANITY = _env("SPELLCHECK_CLEAN_PROFANITY", "true", type_=bool)
+
+_PROFANITY_RULE_RU = "\n- Замени обсценную лексику, мат и грубые выражения на нейтральные эквиваленты, сохраняя смысл"
+_PROFANITY_RULE_EN = "\n- Replace profanity, obscene language, and vulgar expressions with neutral equivalents, preserving meaning"
 
 SPELLCHECK_PROMPT_RU = """Исправь следующий текст (язык: {detected_lang}). Правила:
 - Исправь пунктуацию, заглавные буквы и явные грамматические ошибки
@@ -140,7 +151,7 @@ SPELLCHECK_PROMPT_RU = """Исправь следующий текст (язык
 - Технические термины, названия и специальную лексику оставляй как есть
 - НЕ изменяй URL, пути файлов и фрагменты кода
 - Пиши ТОЛЬКО на русском языке, НЕ транслитерируй в латиницу
-- Верни ТОЛЬКО исправленный текст, без пояснений
+- Верни ТОЛЬКО исправленный текст, без пояснений{profanity_rule}
 
 Текст: {raw_text}"""
 
@@ -153,7 +164,7 @@ SPELLCHECK_PROMPT_EN = """Fix the following text. Rules:
 - Do NOT modify URLs, file paths, or code snippets
 - Keep the original language ({detected_lang}) - do NOT transliterate to Latin script
 - If it's already clean, return as-is
-- Return ONLY the cleaned text, no explanations
+- Return ONLY the cleaned text, no explanations{profanity_rule}
 
 Text: {raw_text}"""
 
@@ -1222,7 +1233,11 @@ def _spellcheck_process():
         else:
             prompt_template = SPELLCHECK_PROMPT_EN
 
-        prompt = prompt_template.format(detected_lang=lang, raw_text=new_text)
+        if SPELLCHECK_CLEAN_PROFANITY:
+            prof_rule = _PROFANITY_RULE_RU if lang.startswith("ru") else _PROFANITY_RULE_EN
+        else:
+            prof_rule = ""
+        prompt = prompt_template.format(detected_lang=lang, raw_text=new_text, profanity_rule=prof_rule)
 
         # Send to LLM
         print(f"SpellCheck: LLM ({LLM_BACKEND}, lang={lang})...")
@@ -1276,9 +1291,11 @@ def _spellcheck_process():
         _spellcheck_lock.release()
 
 
-def _on_spellcheck_hotkey():
-    """SpellCheck hotkey handler - spawns processing in a daemon thread."""
+def _on_spellcheck_key(_event=None):
+    """SpellCheck hotkey handler (on key press). Checks modifier and spawns processing."""
     if not SPELLCHECK_ENABLED or _recording:
+        return
+    if SPELLCHECK_MODIFIER is not None and not keyboard.is_pressed(SPELLCHECK_MODIFIER):
         return
     threading.Thread(target=_spellcheck_process, daemon=True).start()
 
@@ -1363,9 +1380,9 @@ def register_hotkeys():
     _suppress = HOTKEY_KEY in ("alt", "pause")
     keyboard.on_press_key(HOTKEY_KEY, _on_hotkey_press, suppress=_suppress)
     keyboard.on_release_key(HOTKEY_KEY, _on_hotkey_release, suppress=_suppress)
-    # SpellCheck hotkey (combo like ctrl+t — uses add_hotkey, not on_press_key)
+    # SpellCheck hotkey (same pattern as PTT: on_press_key + modifier check)
     if SPELLCHECK_ENABLED:
-        keyboard.add_hotkey(SPELLCHECK_HOTKEY, _on_spellcheck_hotkey, suppress=True)
+        keyboard.on_press_key(SPELLCHECK_KEY, _on_spellcheck_key, suppress=False)
 
 
 def unregister_hotkeys():
@@ -1400,7 +1417,8 @@ def reload_config():
     global CHUNK_DURATION_SEC, CHUNK_OVERLAP_SEC
     global SHOW_NOTIFICATIONS, LOG_ENABLED, _log_handler
     global AUDIO_DEVICE
-    global SPELLCHECK_ENABLED, SPELLCHECK_HOTKEY, SPELLCHECK_LANGUAGE, SPELLCHECK_PROMPT
+    global SPELLCHECK_ENABLED, SPELLCHECK_HOTKEY, SPELLCHECK_MODIFIER, SPELLCHECK_KEY
+    global SPELLCHECK_LANGUAGE, SPELLCHECK_CLEAN_PROFANITY, SPELLCHECK_PROMPT
 
     # Re-read .env
     try:
@@ -1440,7 +1458,13 @@ def reload_config():
 
     SPELLCHECK_ENABLED = _env("SPELLCHECK_ENABLED", "true", type_=bool)
     SPELLCHECK_HOTKEY = _env("SPELLCHECK_HOTKEY", "ctrl+t").strip().lower().replace(" ", "")
+    if "+" in SPELLCHECK_HOTKEY:
+        _sc_parts = SPELLCHECK_HOTKEY.split("+", 1)
+        SPELLCHECK_MODIFIER, SPELLCHECK_KEY = _sc_parts[0].strip(), _sc_parts[1].strip()
+    else:
+        SPELLCHECK_MODIFIER, SPELLCHECK_KEY = None, SPELLCHECK_HOTKEY
     SPELLCHECK_LANGUAGE = _env("SPELLCHECK_LANGUAGE", "auto").strip().lower()
+    SPELLCHECK_CLEAN_PROFANITY = _env("SPELLCHECK_CLEAN_PROFANITY", "true", type_=bool)
     SPELLCHECK_PROMPT = _get_spellcheck_prompt()
 
     SHOW_NOTIFICATIONS = _env("SHOW_NOTIFICATIONS", "true", type_=bool)
@@ -1496,6 +1520,7 @@ def get_config():
         "SPELLCHECK_ENABLED": SPELLCHECK_ENABLED,
         "SPELLCHECK_HOTKEY": SPELLCHECK_HOTKEY,
         "SPELLCHECK_LANGUAGE": SPELLCHECK_LANGUAGE,
+        "SPELLCHECK_CLEAN_PROFANITY": SPELLCHECK_CLEAN_PROFANITY,
     }
 
 

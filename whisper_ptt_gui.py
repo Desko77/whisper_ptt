@@ -482,6 +482,7 @@ class SettingsDialog(QDialog):
         self._add_combo(scf, "SPELLCHECK_LANGUAGE", "Language:", [
             "auto", "ru", "en",
         ])
+        self._add_check(scf, "SPELLCHECK_CLEAN_PROFANITY", "Clean profanity")
         tabs.addTab(sc_tab, "SpellCheck")
 
         # General tab
@@ -789,9 +790,11 @@ class WhisperPTTApp:
         try:
             core.unregister_hotkeys()
             core.register_hotkeys()
-            hotkey = core.HOTKEY.upper()
+            parts = [core.HOTKEY.upper()]
+            if core.SPELLCHECK_ENABLED:
+                parts.append(f"SpellCheck: {core.SPELLCHECK_HOTKEY.upper()}")
             self._tray.showMessage(
-                "Whisper PTT", f"Hotkeys re-registered ({hotkey})",
+                "Whisper PTT", f"Hotkeys re-registered ({', '.join(parts)})",
                 QSystemTrayIcon.MessageIcon.Information, 2000)
         except Exception as e:
             self._tray.showMessage(

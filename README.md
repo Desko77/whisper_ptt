@@ -164,6 +164,7 @@ All settings are read from `WHISPER_PTT_*` environment variables, a `.env` file,
 | `WHISPER_PTT_SPELLCHECK_ENABLED` | Enable SpellCheck feature (Windows) | `true` |
 | `WHISPER_PTT_SPELLCHECK_HOTKEY` | SpellCheck hotkey | `ctrl+t` |
 | `WHISPER_PTT_SPELLCHECK_LANGUAGE` | SpellCheck language detection: `auto`, `ru`, `en` | `auto` |
+| `WHISPER_PTT_SPELLCHECK_CLEAN_PROFANITY` | Replace profanity with neutral equivalents | `true` |
 
 <details>
 <summary>Advanced settings</summary>
@@ -203,12 +204,14 @@ Select text in any window, press **Ctrl+T** (default). The selected text is capt
 - Auto-detects language (Russian/English) or can be forced via config
 - Built-in prompts forbid rephrasing - only minimal fixes (punctuation, typos, capitalization)
 - Technical terms, URLs, and code snippets are preserved
+- Optional profanity filter - replaces obscene language with neutral equivalents (on by default)
 
 Configure via `.env` or GUI (SpellCheck tab):
 ```bash
 WHISPER_PTT_SPELLCHECK_ENABLED=true
 WHISPER_PTT_SPELLCHECK_HOTKEY=ctrl+t
-WHISPER_PTT_SPELLCHECK_LANGUAGE=auto   # auto, ru, en
+WHISPER_PTT_SPELLCHECK_LANGUAGE=auto            # auto, ru, en
+WHISPER_PTT_SPELLCHECK_CLEAN_PROFANITY=true     # replace profanity with neutral text
 ```
 
 ---
