@@ -1,8 +1,12 @@
 # Whisper-PTT
 
-**Local Push-to-Talk Voice-to-Text** with system tray GUI, recording overlay, and optional LLM post-processing. Fully offline - nothing leaves your machine.
+**Local Push-to-Talk Voice-to-Text + AI Spell Checker** with system tray GUI, recording overlay, and LLM post-processing. Fully offline - nothing leaves your machine.
 
-Hold a hotkey, speak, release. Transcribed text is pasted into the active window (or copied to clipboard). A local LLM (Ollama, LM Studio, or any OpenAI-compatible server) can optionally transform the output - fix grammar, translate, reformat, or anything else you can describe in a prompt.
+Two modes in one app:
+- **Voice-to-text** - hold a hotkey, speak, release. Transcribed text is pasted into the active window.
+- **SpellCheck** - select text, press hotkey. LLM fixes grammar and typos, pastes corrected text back.
+
+A local LLM (Ollama, LM Studio, or any OpenAI-compatible server) powers both STT post-processing and spell checking.
 
 > Based on [sancau/whisper_ptt](https://github.com/sancau/whisper_ptt). This project has diverged significantly with a GUI, chunked transcription, multi-backend LLM support, and many other features.
 
@@ -14,6 +18,7 @@ Hold a hotkey, speak, release. Transcribed text is pasted into the active window
 
 - **System tray GUI** (PySide6) - tray icon, recording overlay with waveform, settings dialog
 - **Push-to-talk** - hold hotkey to record, release to transcribe and paste
+- **SpellCheck** - select text, press hotkey, LLM fixes grammar/typos and pastes back (Windows)
 - **GPU-accelerated Whisper** - NVIDIA CUDA (faster-whisper) or Apple Silicon (mlx-whisper)
 - **Chunked transcription** - long recordings split into overlapping chunks for better accuracy
 - **LLM post-processing** - Ollama or OpenAI-compatible backends (LM Studio, llama.cpp, etc.)
@@ -156,6 +161,9 @@ All settings are read from `WHISPER_PTT_*` environment variables, a `.env` file,
 | `WHISPER_PTT_KEYS_AFTER_PASTE` | Key(s) to send after paste (`enter`, `ctrl+enter`, `none`) | `enter` |
 | `WHISPER_PTT_CHUNK_DURATION_SEC` | Chunk duration for long recordings (0 = disabled) | `15` |
 | `WHISPER_PTT_CHUNK_OVERLAP_SEC` | Overlap between chunks | `2.0` |
+| `WHISPER_PTT_SPELLCHECK_ENABLED` | Enable SpellCheck feature (Windows) | `true` |
+| `WHISPER_PTT_SPELLCHECK_HOTKEY` | SpellCheck hotkey | `ctrl+t` |
+| `WHISPER_PTT_SPELLCHECK_LANGUAGE` | SpellCheck language detection: `auto`, `ru`, `en` | `auto` |
 
 <details>
 <summary>Advanced settings</summary>
@@ -181,9 +189,27 @@ All settings are read from `WHISPER_PTT_*` environment variables, a `.env` file,
 
 ## Usage
 
-Default hotkey: **Alt** (Windows/Linux) or **Option** (macOS). Hold to record, release to transcribe. Exit with Ctrl+C (console) or Quit from tray menu (GUI). The defaults are convenient but can interfere with other shortcuts - consider remapping to `pause` or a combo like `option+f2` via `WHISPER_PTT_HOTKEY`.
+### Voice-to-text
+
+Default hotkey: **Alt** (Windows/Linux) or **Option** (macOS). Hold to record, release to transcribe. Exit with Ctrl+C (console) or Quit from tray menu (GUI). The defaults are convenient but can interfere with other shortcuts - consider remapping to `pause` or a combo like `ctrl+space` via `WHISPER_PTT_HOTKEY`.
 
 With LLM transform enabled, the raw transcription is passed through the LLM before pasting. What the LLM does is entirely controlled by the prompt - grammar cleanup, email formatting, translation, or any other text transformation.
+
+### SpellCheck (Windows only)
+
+Select text in any window, press **Ctrl+T** (default). The selected text is captured via Ctrl+C, sent to the LLM for grammar/typo correction, and the fixed text is pasted back. The original clipboard is preserved.
+
+- Uses the same LLM backend and model as voice-to-text
+- Auto-detects language (Russian/English) or can be forced via config
+- Built-in prompts forbid rephrasing - only minimal fixes (punctuation, typos, capitalization)
+- Technical terms, URLs, and code snippets are preserved
+
+Configure via `.env` or GUI (SpellCheck tab):
+```bash
+WHISPER_PTT_SPELLCHECK_ENABLED=true
+WHISPER_PTT_SPELLCHECK_HOTKEY=ctrl+t
+WHISPER_PTT_SPELLCHECK_LANGUAGE=auto   # auto, ru, en
+```
 
 ---
 

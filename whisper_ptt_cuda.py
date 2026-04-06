@@ -127,6 +127,48 @@ def _get_llm_prompt():
 
 LLM_TRANSFORM_PROMPT = _get_llm_prompt()
 
+# SpellCheck: hotkey to capture selected text, fix via LLM, paste back
+SPELLCHECK_ENABLED = _env("SPELLCHECK_ENABLED", "true", type_=bool)
+SPELLCHECK_HOTKEY = _env("SPELLCHECK_HOTKEY", "ctrl+t").strip().lower().replace(" ", "")
+SPELLCHECK_LANGUAGE = _env("SPELLCHECK_LANGUAGE", "auto").strip().lower()
+
+SPELLCHECK_PROMPT_RU = """Исправь следующий текст (язык: {detected_lang}). Правила:
+- Исправь пунктуацию, заглавные буквы и явные грамматические ошибки
+- Исправь опечатки (перестановки букв, пропущенные/лишние буквы)
+- При сомнении - НЕ меняй. Лучше оставить как есть, чем испортить
+- НЕ перефразируй - сохраняй порядок слов и структуру предложения
+- Технические термины, названия и специальную лексику оставляй как есть
+- НЕ изменяй URL, пути файлов и фрагменты кода
+- Пиши ТОЛЬКО на русском языке, НЕ транслитерируй в латиницу
+- Верни ТОЛЬКО исправленный текст, без пояснений
+
+Текст: {raw_text}"""
+
+SPELLCHECK_PROMPT_EN = """Fix the following text. Rules:
+- Fix punctuation, capitalization, and obvious grammar errors
+- Fix typos (letter transpositions, missing/extra letters)
+- When in doubt - do NOT change. Better to leave as-is than to break it
+- Do NOT rephrase - preserve word order and sentence structure
+- Keep technical terms, names, and domain-specific vocabulary as-is
+- Do NOT modify URLs, file paths, or code snippets
+- Keep the original language ({detected_lang}) - do NOT transliterate to Latin script
+- If it's already clean, return as-is
+- Return ONLY the cleaned text, no explanations
+
+Text: {raw_text}"""
+
+def _get_spellcheck_prompt():
+    custom = _env("SPELLCHECK_PROMPT", "")
+    if custom:
+        return custom
+    if SPELLCHECK_LANGUAGE == "ru":
+        return SPELLCHECK_PROMPT_RU
+    if SPELLCHECK_LANGUAGE == "en":
+        return SPELLCHECK_PROMPT_EN
+    return None  # auto — will be chosen per-text
+
+SPELLCHECK_PROMPT = _get_spellcheck_prompt()
+
 # Output: copy to clipboard and/or paste to active window
 COPY_TO_CLIPBOARD = _env("COPY_TO_CLIPBOARD", "true", type_=bool)
 PASTE_TO_ACTIVE_WINDOW = _env("PASTE_TO_ACTIVE_WINDOW", "true", type_=bool)
@@ -734,6 +776,7 @@ class _INPUT(ctypes.Structure):
 _VK_CONTROL = 0x11
 _VK_SHIFT   = 0x10
 _VK_V       = 0x56
+_VK_C       = 0x43
 _VK_INSERT  = 0x2D
 _extra = ctypes.c_ulong(0)
 
@@ -978,6 +1021,269 @@ def stop_recording_and_process():
 
 
 # -----------------------------------------------------------------------------
+# SpellCheck: capture selected text, fix via LLM, paste back
+# -----------------------------------------------------------------------------
+
+# win32clipboard for full clipboard save/restore (pywin32)
+try:
+    import win32clipboard
+    _HAS_WIN32 = True
+except ImportError:
+    _HAS_WIN32 = False
+
+_CF_UNICODETEXT = 13
+_spellcheck_lock = threading.Lock()
+
+
+def _detect_language(text):
+    """Detect language from text using Unicode character ranges."""
+    if SPELLCHECK_LANGUAGE != "auto":
+        return SPELLCHECK_LANGUAGE
+    if not text:
+        return "en"
+    cyrillic = 0
+    latin = 0
+    for ch in text:
+        cp = ord(ch)
+        if 0x0400 <= cp <= 0x04FF:
+            cyrillic += 1
+        elif (0x0041 <= cp <= 0x005A) or (0x0061 <= cp <= 0x007A) or (0x00C0 <= cp <= 0x024F):
+            latin += 1
+    total = cyrillic + latin
+    if total == 0:
+        return "en"
+    return "ru" if cyrillic / total > 0.3 else "en"
+
+
+def _save_clipboard():
+    """Save all clipboard formats. Returns list of (format, data) tuples."""
+    if not _HAS_WIN32:
+        text = pyperclip.paste() or ""
+        return [(_CF_UNICODETEXT, text.encode("utf-16-le"))]
+    saved = []
+    try:
+        win32clipboard.OpenClipboard()
+        fmt = 0
+        while True:
+            fmt = win32clipboard.EnumClipboardFormats(fmt)
+            if fmt == 0:
+                break
+            try:
+                data = win32clipboard.GetClipboardData(fmt)
+                if isinstance(data, str):
+                    data = data.encode("utf-16-le")
+                elif not isinstance(data, bytes):
+                    continue
+                saved.append((fmt, data))
+            except Exception:
+                continue
+        win32clipboard.CloseClipboard()
+    except Exception as e:
+        _logger.debug("Failed to save clipboard: %s", e)
+        try:
+            win32clipboard.CloseClipboard()
+        except Exception:
+            pass
+    return saved
+
+
+def _restore_clipboard(saved):
+    """Restore clipboard from previously saved formats."""
+    if not saved:
+        return
+    if not _HAS_WIN32:
+        for fmt, data in saved:
+            if fmt == _CF_UNICODETEXT:
+                pyperclip.copy(data.decode("utf-16-le"))
+                return
+        return
+    try:
+        win32clipboard.OpenClipboard()
+        win32clipboard.EmptyClipboard()
+        for fmt, data in saved:
+            try:
+                if fmt == _CF_UNICODETEXT:
+                    win32clipboard.SetClipboardData(fmt, data.decode("utf-16-le"))
+                else:
+                    win32clipboard.SetClipboardData(fmt, data)
+            except Exception:
+                continue
+        win32clipboard.CloseClipboard()
+    except Exception as e:
+        _logger.debug("Failed to restore clipboard: %s", e)
+        try:
+            win32clipboard.CloseClipboard()
+        except Exception:
+            pass
+
+
+def _get_clipboard_text():
+    """Get current clipboard text via win32clipboard or pyperclip."""
+    if _HAS_WIN32:
+        try:
+            win32clipboard.OpenClipboard()
+            try:
+                text = win32clipboard.GetClipboardData(_CF_UNICODETEXT)
+            except Exception:
+                text = ""
+            win32clipboard.CloseClipboard()
+            return text or ""
+        except Exception:
+            try:
+                win32clipboard.CloseClipboard()
+            except Exception:
+                pass
+            return ""
+    return pyperclip.paste() or ""
+
+
+def _set_clipboard_text(text):
+    """Set clipboard to plain text via win32clipboard or pyperclip."""
+    if _HAS_WIN32:
+        try:
+            win32clipboard.OpenClipboard()
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardData(_CF_UNICODETEXT, text)
+            win32clipboard.CloseClipboard()
+            return
+        except Exception:
+            try:
+                win32clipboard.CloseClipboard()
+            except Exception:
+                pass
+    pyperclip.copy(text)
+
+
+def _send_copy():
+    """Send Ctrl+C via SendInput."""
+    _sendinput_combo(_VK_CONTROL, _VK_C)
+
+
+def _clean_llm_response(text):
+    """Strip common LLM artifacts: surrounding quotes, markdown wrappers."""
+    import re
+    result = text.strip()
+    for pat in [
+        r"^Here'?s?\s+the\s+corrected\s+text\s*:\s*\n?",
+        r"^Corrected\s+text\s*:\s*\n?",
+        r"^Исправленный\s+текст\s*:\s*\n?",
+    ]:
+        result = re.sub(pat, "", result, flags=re.IGNORECASE).strip()
+    if len(result) >= 2:
+        for q in ('"', "'", "`"):
+            if result.startswith(q) and result.endswith(q):
+                result = result[1:-1].strip()
+                break
+    return result
+
+
+def _spellcheck_process():
+    """SpellCheck pipeline: capture selected text -> LLM fix -> paste back."""
+    if not _spellcheck_lock.acquire(blocking=False):
+        print("SpellCheck: already processing, skipping")
+        return
+    try:
+        _fire_event("spellcheck_started")
+
+        # Wait for modifier keys to be released (from hotkey)
+        time.sleep(0.3)
+
+        # Save clipboard and capture selected text
+        saved_clipboard = _save_clipboard()
+        old_text = _get_clipboard_text()
+
+        _send_copy()
+
+        # Poll clipboard for changes
+        new_text = old_text
+        for i in range(20):
+            time.sleep(0.05)
+            new_text = _get_clipboard_text()
+            if new_text != old_text:
+                break
+
+        if new_text == old_text or not new_text.strip():
+            print("SpellCheck: no text selected")
+            _restore_clipboard(saved_clipboard)
+            _fire_event("spellcheck_done", {"text": "", "changed": False})
+            return
+
+        print(f"SpellCheck: captured {len(new_text)} chars")
+        _logger.info("SpellCheck captured: %s", new_text[:120])
+
+        # Detect language
+        lang = _detect_language(new_text)
+
+        # Choose prompt
+        if SPELLCHECK_PROMPT is not None:
+            prompt_template = SPELLCHECK_PROMPT
+        elif lang.startswith("ru"):
+            prompt_template = SPELLCHECK_PROMPT_RU
+        else:
+            prompt_template = SPELLCHECK_PROMPT_EN
+
+        prompt = prompt_template.format(detected_lang=lang, raw_text=new_text)
+
+        # Send to LLM
+        print(f"SpellCheck: LLM ({LLM_BACKEND}, lang={lang})...")
+        t0 = time.time()
+        try:
+            if LLM_BACKEND == "openai":
+                result = _llm_request_openai(prompt)
+            else:
+                result = _llm_request_ollama(prompt)
+            result = _clean_llm_response(result)
+            elapsed = time.time() - t0
+            print(f"SpellCheck: LLM ({elapsed:.1f}s): {result[:120]}")
+            _logger.info("SpellCheck LLM %.1fs: %s", elapsed, result[:120])
+        except Exception as e:
+            print(f"SpellCheck: LLM error: {e}")
+            _logger.error("SpellCheck LLM error: %s", e)
+            _restore_clipboard(saved_clipboard)
+            _fire_event("spellcheck_done", {"text": new_text, "changed": False, "error": str(e)})
+            return
+
+        # Skip if no changes or empty
+        if not result or result.strip() == new_text.strip():
+            print("SpellCheck: no changes needed")
+            _restore_clipboard(saved_clipboard)
+            _fire_event("spellcheck_done", {"text": new_text, "changed": False})
+            return
+
+        # Paste corrected text
+        _set_clipboard_text(result)
+        fg_process = _get_foreground_process_name() if os.name == "nt" else ""
+        actual_method = _resolve_paste_method(fg_process)
+        _send_paste(actual_method)
+        time.sleep(0.3)
+
+        # Restore original clipboard
+        _restore_clipboard(saved_clipboard)
+
+        # Sound notification
+        import winsound
+        winsound.MessageBeep(winsound.MB_OK)
+
+        print(f"SpellCheck: done! ({actual_method})")
+        _logger.info("SpellCheck pasted (%s): %s", actual_method, result[:120])
+        _fire_event("spellcheck_done", {"text": result, "changed": True})
+
+    except Exception as e:
+        _logger.error("SpellCheck error: %s", e, exc_info=True)
+        print(f"SpellCheck error: {e}")
+        _fire_event("spellcheck_done", {"text": "", "error": str(e)})
+    finally:
+        _spellcheck_lock.release()
+
+
+def _on_spellcheck_hotkey():
+    """SpellCheck hotkey handler - spawns processing in a daemon thread."""
+    if not SPELLCHECK_ENABLED or _recording:
+        return
+    threading.Thread(target=_spellcheck_process, daemon=True).start()
+
+
+# -----------------------------------------------------------------------------
 # Hotkey and banner
 # -----------------------------------------------------------------------------
 
@@ -1010,7 +1316,9 @@ def _format_banner():
         line(f"     Anti-repeat: ngram={WHISPER_NO_REPEAT_NGRAM_SIZE}, penalty={WHISPER_REPETITION_PENALTY}, halluc_thr={WHISPER_HALLUCINATION_SILENCE_THRESHOLD}") + "\n",
     ]
     if PASTE_TO_ACTIVE_WINDOW:
-        parts.append((line(f'     Keys after paste: "{KEYS_AFTER_PASTE.upper()}"') if KEYS_AFTER_PASTE else line("     Keys after paste: —")) + "\n")
+        parts.append((line(f'     Keys after paste: "{KEYS_AFTER_PASTE.upper()}"') if KEYS_AFTER_PASTE else line("     Keys after paste: -")) + "\n")
+    sc_status = f'ON ("{SPELLCHECK_HOTKEY.upper()}")' if SPELLCHECK_ENABLED else "OFF"
+    parts.append(line(f"     SpellCheck: {sc_status}") + "\n")
     parts.extend([line("") + "\n", line('     "CTRL+C" to exit') + "\n", "╚" + "═" * w + "╝"])
     return "".join(parts)
 
@@ -1051,10 +1359,13 @@ def switch_microphone(device_name=None):
 
 
 def register_hotkeys():
-    """Register keyboard hotkey hooks for push-to-talk."""
+    """Register keyboard hotkey hooks for push-to-talk and spellcheck."""
     _suppress = HOTKEY_KEY in ("alt", "pause")
     keyboard.on_press_key(HOTKEY_KEY, _on_hotkey_press, suppress=_suppress)
     keyboard.on_release_key(HOTKEY_KEY, _on_hotkey_release, suppress=_suppress)
+    # SpellCheck hotkey (combo like ctrl+t — uses add_hotkey, not on_press_key)
+    if SPELLCHECK_ENABLED:
+        keyboard.add_hotkey(SPELLCHECK_HOTKEY, _on_spellcheck_hotkey, suppress=True)
 
 
 def unregister_hotkeys():
@@ -1089,6 +1400,7 @@ def reload_config():
     global CHUNK_DURATION_SEC, CHUNK_OVERLAP_SEC
     global SHOW_NOTIFICATIONS, LOG_ENABLED, _log_handler
     global AUDIO_DEVICE
+    global SPELLCHECK_ENABLED, SPELLCHECK_HOTKEY, SPELLCHECK_LANGUAGE, SPELLCHECK_PROMPT
 
     # Re-read .env
     try:
@@ -1125,6 +1437,11 @@ def reload_config():
     CHUNK_DURATION_SEC = _env("CHUNK_DURATION_SEC", "15", type_=float)
     CHUNK_OVERLAP_SEC = _env("CHUNK_OVERLAP_SEC", "2.0", type_=float)
     AUDIO_DEVICE = _env("AUDIO_DEVICE", "default").strip()
+
+    SPELLCHECK_ENABLED = _env("SPELLCHECK_ENABLED", "true", type_=bool)
+    SPELLCHECK_HOTKEY = _env("SPELLCHECK_HOTKEY", "ctrl+t").strip().lower().replace(" ", "")
+    SPELLCHECK_LANGUAGE = _env("SPELLCHECK_LANGUAGE", "auto").strip().lower()
+    SPELLCHECK_PROMPT = _get_spellcheck_prompt()
 
     SHOW_NOTIFICATIONS = _env("SHOW_NOTIFICATIONS", "true", type_=bool)
     new_log = _env("LOG_ENABLED", "false", type_=bool)
@@ -1176,6 +1493,9 @@ def get_config():
         "AUDIO_DEVICE": AUDIO_DEVICE,
         "LOG_ENABLED": LOG_ENABLED,
         "SHOW_NOTIFICATIONS": SHOW_NOTIFICATIONS,
+        "SPELLCHECK_ENABLED": SPELLCHECK_ENABLED,
+        "SPELLCHECK_HOTKEY": SPELLCHECK_HOTKEY,
+        "SPELLCHECK_LANGUAGE": SPELLCHECK_LANGUAGE,
     }
 
 

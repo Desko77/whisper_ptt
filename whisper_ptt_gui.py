@@ -46,6 +46,8 @@ class AudioBridge(QObject):
     recording_stopped = Signal()
     processing_started = Signal()
     transcription_done = Signal(str)
+    spellcheck_started = Signal()
+    spellcheck_done = Signal(str, bool)  # text, changed
     error_occurred = Signal(str)
 
     def __init__(self):
@@ -53,6 +55,7 @@ class AudioBridge(QObject):
         self._audio_levels = collections.deque(maxlen=128)
         self._text_queue = queue.Queue()
         self._error_queue = queue.Queue()
+        self._sc_queue = queue.Queue()
 
     def on_audio_level(self, peak):
         """Called from prebuffer thread. Writes to deque (thread-safe)."""
@@ -69,6 +72,13 @@ class AudioBridge(QObject):
         elif event == "transcription_done":
             self._text_queue.put(data.get("text", ""))
             QMetaObject.invokeMethod(self, "_emit_transcription_done", Qt.QueuedConnection)
+        elif event == "spellcheck_started":
+            QMetaObject.invokeMethod(self, "_emit_spellcheck_started", Qt.QueuedConnection)
+        elif event == "spellcheck_done":
+            text = data.get("text", "") if data else ""
+            changed = data.get("changed", False) if data else False
+            self._sc_queue.put((text, changed))
+            QMetaObject.invokeMethod(self, "_emit_spellcheck_done", Qt.QueuedConnection)
         elif event == "error":
             self._error_queue.put(data.get("message", "Unknown error"))
             QMetaObject.invokeMethod(self, "_emit_error", Qt.QueuedConnection)
@@ -92,6 +102,18 @@ class AudioBridge(QObject):
         except queue.Empty:
             return
         self.transcription_done.emit(text)
+
+    @Slot()
+    def _emit_spellcheck_started(self):
+        self.spellcheck_started.emit()
+
+    @Slot()
+    def _emit_spellcheck_done(self):
+        try:
+            text, changed = self._sc_queue.get_nowait()
+        except queue.Empty:
+            return
+        self.spellcheck_done.emit(text, changed)
 
     @Slot()
     def _emit_error(self):
@@ -375,7 +397,7 @@ class SettingsDialog(QDialog):
     """Settings dialog reading/writing .env file."""
 
     # Settings that require app restart
-    RESTART_KEYS = {"WHISPER_MODEL", "SAMPLE_RATE", "CHUNK_SIZE", "HOTKEY"}
+    RESTART_KEYS = {"WHISPER_MODEL", "SAMPLE_RATE", "CHUNK_SIZE", "HOTKEY", "SPELLCHECK_HOTKEY"}
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -451,6 +473,16 @@ class SettingsDialog(QDialog):
         self._add_dspin(cf, "CHUNK_DURATION_SEC", "Chunk duration (sec):", 0.0, 120.0, 1.0)
         self._add_dspin(cf, "CHUNK_OVERLAP_SEC", "Chunk overlap (sec):", 0.0, 10.0, 0.5)
         tabs.addTab(chunk_tab, "Chunking")
+
+        # SpellCheck tab
+        sc_tab = QWidget()
+        scf = QFormLayout(sc_tab)
+        self._add_check(scf, "SPELLCHECK_ENABLED", "Enable SpellCheck")
+        self._add_text(scf, "SPELLCHECK_HOTKEY", "Hotkey:")
+        self._add_combo(scf, "SPELLCHECK_LANGUAGE", "Language:", [
+            "auto", "ru", "en",
+        ])
+        tabs.addTab(sc_tab, "SpellCheck")
 
         # General tab
         general_tab = QWidget()
@@ -647,6 +679,8 @@ class WhisperPTTApp:
         self._bridge.recording_stopped.connect(self._on_recording_stopped)
         self._bridge.processing_started.connect(self._on_processing_started)
         self._bridge.transcription_done.connect(self._on_transcription_done)
+        self._bridge.spellcheck_started.connect(self._on_spellcheck_started)
+        self._bridge.spellcheck_done.connect(self._on_spellcheck_done)
         self._bridge.error_occurred.connect(self._on_error)
 
         # Register callbacks with core
@@ -721,6 +755,19 @@ class WhisperPTTApp:
         self._tray.showMessage(
             "Whisper PTT - Error", message[:300],
             QSystemTrayIcon.MessageIcon.Critical, 5000)
+
+    @Slot()
+    def _on_spellcheck_started(self):
+        self._set_state("processing")
+
+    @Slot(str, bool)
+    def _on_spellcheck_done(self, text, changed):
+        self._set_state("idle")
+        if core.SHOW_NOTIFICATIONS:
+            if changed and text.strip():
+                self._tray.showMessage("SpellCheck", text[:200], QSystemTrayIcon.MessageIcon.Information, 3000)
+            elif not changed and not text:
+                pass  # no text selected — silent
 
     def _open_log(self):
         log_path = core.get_log_path()

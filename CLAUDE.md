@@ -4,7 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Whisper-PTT is a local push-to-talk voice-to-text tool. Hold a hotkey, speak, release — transcribed text is pasted into the active window. Fully offline, GPU-accelerated only. Optional Ollama-based LLM post-processing (grammar fix, translation, etc.).
+Whisper-PTT is a local push-to-talk voice-to-text tool with integrated spell-checker. Two modes:
+1. **Voice-to-text**: Hold a hotkey, speak, release - transcribed text is pasted into the active window.
+2. **SpellCheck**: Press hotkey - selected text is captured, fixed by LLM (grammar/typos), pasted back.
+
+Fully offline, GPU-accelerated only. LLM post-processing via Ollama or OpenAI-compatible API (LM Studio, etc.).
 
 ## Architecture
 
@@ -23,9 +27,14 @@ Both scripts share the same pipeline and config schema but differ in platform-sp
 ### Pipeline (both scripts)
 
 ```
-prebuffer_worker (ring buffer) → start_recording → stop_recording_and_process
-  → silence/duration gate → transcribe (Whisper) → transform_with_llm (optional)
-  → paste_to_front (clipboard + simulated Ctrl+V/Cmd+V)
+Voice-to-text:
+  prebuffer_worker (ring buffer) -> start_recording -> stop_recording_and_process
+    -> silence/duration gate -> transcribe (Whisper) -> transform_with_llm (optional)
+    -> paste_to_front (clipboard + simulated Ctrl+V/Cmd+V)
+
+SpellCheck (CUDA only):
+  hotkey -> save clipboard -> SendInput Ctrl+C -> detect language
+    -> LLM fix (grammar/typos) -> SendInput Ctrl+V -> restore clipboard
 ```
 
 ## Running
