@@ -437,7 +437,19 @@ def _open_microphone_stream():
 def prebuffer_worker():
     """Background thread: read mic into ring buffer; when recording, also append to _audio_frames."""
     global _recording, _audio_frames
+
+    def _get_default_device_idx():
+        try:
+            return _pyaudio_instance.get_default_input_device_info()["index"]
+        except (OSError, KeyError):
+            return None
+
     stream = _open_microphone_stream()
+    # Track default device index for auto-detection of system default changes
+    _default_check_interval = max(1, int(SAMPLE_RATE / CHUNK_SIZE * 2))  # ~every 2 sec
+    _default_check_counter = 0
+    _last_default_idx = _get_default_device_idx() if (not AUDIO_DEVICE or AUDIO_DEVICE.lower() == "default") else None
+
     while _prebuffer_running:
         # Check if mic switch was requested
         if _mic_switch_event.is_set():
@@ -449,11 +461,39 @@ def prebuffer_worker():
                 pass
             try:
                 stream = _open_microphone_stream()
+                if not AUDIO_DEVICE or AUDIO_DEVICE.lower() == "default":
+                    _last_default_idx = _get_default_device_idx()
+                else:
+                    _last_default_idx = None
                 print(f"🎤 Switched to: {get_active_device_name()}")
             except RuntimeError:
                 print("Mic switch failed, prebuffer stopping.")
                 return
             continue
+
+        # Auto-detect system default device change (only when AUDIO_DEVICE="default" and not recording)
+        _default_check_counter += 1
+        if _default_check_counter >= _default_check_interval:
+            _default_check_counter = 0
+            if (not AUDIO_DEVICE or AUDIO_DEVICE.lower() == "default") and not _recording:
+                new_default = _get_default_device_idx()
+                if new_default is not None and new_default != _last_default_idx:
+                    try:
+                        stream.stop_stream()
+                        stream.close()
+                    except Exception:
+                        pass
+                    try:
+                        stream = _open_microphone_stream()
+                        _last_default_idx = new_default
+                        dev_name = get_active_device_name()
+                        print(f"🎤 Default device changed, switched to: {dev_name}")
+                        _logger.info(f"Auto-switched mic to: {dev_name}")
+                        _fire_event("mic_auto_switched", dev_name)
+                    except RuntimeError:
+                        print("❌ Auto mic switch failed, prebuffer stopping.")
+                        return
+                    continue
         try:
             chunk = stream.read(CHUNK_SIZE, exception_on_overflow=False)
         except OSError as e:

@@ -48,6 +48,7 @@ class AudioBridge(QObject):
     transcription_done = Signal(str)
     spellcheck_started = Signal()
     spellcheck_done = Signal(str, bool)  # text, changed
+    mic_auto_switched = Signal(str)  # device name
     error_occurred = Signal(str)
 
     def __init__(self):
@@ -56,6 +57,7 @@ class AudioBridge(QObject):
         self._text_queue = queue.Queue()
         self._error_queue = queue.Queue()
         self._sc_queue = queue.Queue()
+        self._mic_queue = queue.Queue()
 
     def on_audio_level(self, peak):
         """Called from prebuffer thread. Writes to deque (thread-safe)."""
@@ -79,6 +81,9 @@ class AudioBridge(QObject):
             changed = data.get("changed", False) if data else False
             self._sc_queue.put((text, changed))
             QMetaObject.invokeMethod(self, "_emit_spellcheck_done", Qt.QueuedConnection)
+        elif event == "mic_auto_switched":
+            self._mic_queue.put(data if isinstance(data, str) else str(data))
+            QMetaObject.invokeMethod(self, "_emit_mic_auto_switched", Qt.QueuedConnection)
         elif event == "error":
             self._error_queue.put(data.get("message", "Unknown error"))
             QMetaObject.invokeMethod(self, "_emit_error", Qt.QueuedConnection)
@@ -114,6 +119,14 @@ class AudioBridge(QObject):
         except queue.Empty:
             return
         self.spellcheck_done.emit(text, changed)
+
+    @Slot()
+    def _emit_mic_auto_switched(self):
+        try:
+            dev_name = self._mic_queue.get_nowait()
+        except queue.Empty:
+            return
+        self.mic_auto_switched.emit(dev_name)
 
     @Slot()
     def _emit_error(self):
@@ -682,6 +695,7 @@ class WhisperPTTApp:
         self._bridge.transcription_done.connect(self._on_transcription_done)
         self._bridge.spellcheck_started.connect(self._on_spellcheck_started)
         self._bridge.spellcheck_done.connect(self._on_spellcheck_done)
+        self._bridge.mic_auto_switched.connect(self._on_mic_auto_switched)
         self._bridge.error_occurred.connect(self._on_error)
 
         # Register callbacks with core
@@ -751,6 +765,13 @@ class WhisperPTTApp:
             self._tray.showMessage("Whisper PTT", text[:200], QSystemTrayIcon.MessageIcon.Information, 3000)
 
     @Slot(str)
+    @Slot(str)
+    def _on_mic_auto_switched(self, dev_name):
+        if core.SHOW_NOTIFICATIONS:
+            self._tray.showMessage(
+                "Whisper PTT", f"Mic switched to: {dev_name}",
+                QSystemTrayIcon.MessageIcon.Information, 3000)
+
     def _on_error(self, message):
         self._set_state("idle")
         self._tray.showMessage(

@@ -26,7 +26,7 @@ A local LLM (Ollama, LM Studio, or any OpenAI-compatible server) powers both STT
 - **Windows autostart** - launch at login with startup delay for reliable hotkey registration
 - **Single instance** - prevents duplicate processes
 - **Logging** - optional file logging for diagnostics
-- **Microphone selection** - choose input device from GUI (hot-swap without restart)
+- **Microphone selection** - choose input device from GUI (hot-swap without restart), auto-detects system default device changes
 - **Fully configurable** - all settings via `.env` file or GUI settings dialog
 
 ---
