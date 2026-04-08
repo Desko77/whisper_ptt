@@ -22,7 +22,7 @@ A local LLM (Ollama, LM Studio, or any OpenAI-compatible server) powers both STT
 - **GPU-accelerated Whisper** - NVIDIA CUDA (faster-whisper) or Apple Silicon (mlx-whisper)
 - **Chunked transcription** - long recordings split into overlapping chunks for better accuracy
 - **LLM post-processing** - Ollama or OpenAI-compatible backends (LM Studio, llama.cpp, etc.)
-- **Smart paste** - auto-detect terminals, configurable paste method and keys after paste
+- **Smart paste** - auto-detect terminals (including Electron apps after auto-update), modifier key release before paste, configurable paste method
 - **Windows autostart** - launch at login with startup delay for reliable hotkey registration
 - **Single instance** - prevents duplicate processes
 - **Logging** - optional file logging for diagnostics
@@ -153,6 +153,7 @@ All settings are read from `WHISPER_PTT_*` environment variables, a `.env` file,
 | `WHISPER_PTT_LLM_BACKEND` | LLM backend: `ollama` or `openai` (LM Studio, llama.cpp) | `ollama` |
 | `WHISPER_PTT_LLM_MODEL` | LLM model name | `gemma3:12b` |
 | `WHISPER_PTT_LLM_URL` | LLM API URL | auto by backend |
+| `WHISPER_PTT_LLM_REASONING_EFFORT` | Reasoning effort for thinking models: `none`, `low`, `medium`, `high` | - |
 | `WHISPER_PTT_AUDIO_DEVICE` | Microphone: `default` or device name substring (e.g. `Realtek`) | `default` |
 | `WHISPER_PTT_COPY_TO_CLIPBOARD` | Copy result to clipboard | `true` |
 | `WHISPER_PTT_PASTE_TO_ACTIVE_WINDOW` | Paste into focused window | `true` |

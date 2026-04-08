@@ -773,7 +773,9 @@ def _resolve_paste_method(saved_fg_process=""):
     if PASTE_METHOD != "auto":
         return PASTE_METHOD
     proc = saved_fg_process or _get_foreground_process_name()
-    if proc in _TERMINAL_PROCESSES:
+    # Strip Electron auto-update suffix: "claude.exe.old.1775632536186" -> "claude.exe"
+    base_proc = proc.split(".exe")[0] + ".exe" if ".exe" in proc else proc
+    if base_proc in _TERMINAL_PROCESSES:
         return "ctrl+shift+v"
     return "ctrl+v"
 
@@ -832,6 +834,34 @@ _VK_INSERT  = 0x2D
 _extra = ctypes.c_ulong(0)
 
 
+_VK_MENU    = 0x12  # Alt
+_VK_LWIN    = 0x5B
+_VK_RWIN    = 0x5C
+_ALL_MODIFIERS = (_VK_CONTROL, _VK_SHIFT, _VK_MENU, _VK_LWIN, _VK_RWIN)
+
+
+def _release_stuck_modifiers():
+    """Release any modifier keys stuck in pressed state (e.g. after suppress)."""
+    get_state = ctypes.windll.user32.GetAsyncKeyState
+    stuck = []
+    for vk in _ALL_MODIFIERS:
+        if get_state(vk) & 0x8000:
+            stuck.append(vk)
+    if not stuck:
+        return
+    n = len(stuck)
+    arr = (_INPUT * n)()
+    for i, vk in enumerate(stuck):
+        arr[i].type = _INPUT_KEYBOARD
+        arr[i].union.ki.wVk = vk
+        arr[i].union.ki.dwFlags = _KEYEVENTF_KEYUP
+        arr[i].union.ki.dwExtraInfo = ctypes.pointer(_extra)
+    ctypes.windll.user32.SendInput(n, arr, ctypes.sizeof(_INPUT))
+    names = {_VK_CONTROL: "Ctrl", _VK_SHIFT: "Shift", _VK_MENU: "Alt",
+             _VK_LWIN: "LWin", _VK_RWIN: "RWin"}
+    _logger.debug("Released stuck modifiers: %s", [names.get(v, hex(v)) for v in stuck])
+
+
 def _sendinput_combo(*vk_codes):
     """Send a key combination atomically via SendInput."""
     n = len(vk_codes) * 2
@@ -849,11 +879,15 @@ def _sendinput_combo(*vk_codes):
         arr[idx].union.ki.dwFlags = _KEYEVENTF_KEYUP
         arr[idx].union.ki.dwExtraInfo = ctypes.pointer(_extra)
         idx += 1
-    ctypes.windll.user32.SendInput(n, arr, ctypes.sizeof(_INPUT))
+    sent = ctypes.windll.user32.SendInput(n, arr, ctypes.sizeof(_INPUT))
+    if sent != n:
+        _logger.warning("SendInput: sent %d/%d events (blocked by UIPI?)", sent, n)
+    return sent
 
 
 def _send_paste(method=None):
     """Send paste keystroke via SendInput (atomic, layout-safe)."""
+    _release_stuck_modifiers()
     method = method or _resolve_paste_method()
     if method == "ctrl+shift+v":
         _sendinput_combo(_VK_CONTROL, _VK_SHIFT, _VK_V)
@@ -885,13 +919,16 @@ def paste_to_front(text, saved_fg_process=""):
         winsound.MessageBeep(winsound.MB_OK)
     if PASTE_TO_ACTIVE_WINDOW:
         actual_method = _resolve_paste_method(saved_fg_process)
+        fg_now = _get_foreground_process_name() if os.name == "nt" else ""
+        _logger.info("Paste target: saved=%s, now=%s, method=%s",
+                      saved_fg_process, fg_now, actual_method)
         _send_paste(actual_method)
         time.sleep(0.15)
         if KEYS_AFTER_PASTE:
             time.sleep(0.05)
             _send_keys_after()
         suffix = f' + "{KEYS_AFTER_PASTE.upper()}"' if KEYS_AFTER_PASTE else ""
-        print(f"✅ Pasted ({actual_method}){suffix}!")
+        print(f"✅ Pasted ({actual_method}) to {fg_now or 'unknown'}{suffix}!")
         _logger.info("Pasted (%s): %s", actual_method, text[:120])
         # Wait for paste to complete before touching clipboard
         time.sleep(0.3)
