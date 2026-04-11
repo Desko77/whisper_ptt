@@ -352,9 +352,12 @@ def _fix_device_name(name):
 
 
 def list_audio_devices():
-    """Return list of input devices: [{"index": int, "name": str, "is_default": bool}, ...]."""
-    pa = _pyaudio_instance or pyaudio.PyAudio()
-    own_pa = _pyaudio_instance is None
+    """Return list of input devices: [{"index": int, "name": str, "is_default": bool}, ...].
+
+    Always creates a fresh PyAudio instance to get up-to-date device info
+    and avoid thread-safety issues with _pyaudio_instance (owned by prebuffer_worker).
+    """
+    pa = pyaudio.PyAudio()
     try:
         default_idx = None
         try:
@@ -375,8 +378,28 @@ def list_audio_devices():
                 })
         return devices
     finally:
-        if own_pa:
-            pa.terminate()
+        pa.terminate()
+
+
+def _probe_default_device_index():
+    """Get current system default input device index using a fresh PortAudio scan.
+
+    Creates a temporary PyAudio instance to force PortAudio to rescan devices,
+    avoiding stale cached device lists that miss hot-plug/unplug events.
+    Returns the device index (int) or None if no input device is available.
+    """
+    pa = None
+    try:
+        pa = pyaudio.PyAudio()
+        return pa.get_default_input_device_info()["index"]
+    except (OSError, KeyError):
+        return None
+    finally:
+        if pa:
+            try:
+                pa.terminate()
+            except Exception:
+                pass
 
 
 def _resolve_device_index():
@@ -434,21 +457,29 @@ def _open_microphone_stream():
     raise RuntimeError("Could not open microphone after retries - check audio permissions and device.")
 
 
+def _reinit_pyaudio():
+    """Terminate and re-create the global PyAudio instance.
+
+    Must be called from prebuffer_worker thread only (which owns _pyaudio_instance).
+    Forces PortAudio to rescan devices so newly connected/disconnected mics are visible.
+    """
+    global _pyaudio_instance
+    try:
+        _pyaudio_instance.terminate()
+    except Exception:
+        pass
+    _pyaudio_instance = pyaudio.PyAudio()
+
+
 def prebuffer_worker():
     """Background thread: read mic into ring buffer; when recording, also append to _audio_frames."""
     global _recording, _audio_frames
-
-    def _get_default_device_idx():
-        try:
-            return _pyaudio_instance.get_default_input_device_info()["index"]
-        except (OSError, KeyError):
-            return None
 
     stream = _open_microphone_stream()
     # Track default device index for auto-detection of system default changes
     _default_check_interval = max(1, int(SAMPLE_RATE / CHUNK_SIZE * 2))  # ~every 2 sec
     _default_check_counter = 0
-    _last_default_idx = _get_default_device_idx() if (not AUDIO_DEVICE or AUDIO_DEVICE.lower() == "default") else None
+    _last_default_idx = _probe_default_device_index() if (not AUDIO_DEVICE or AUDIO_DEVICE.lower() == "default") else None
 
     while _prebuffer_running:
         # Check if mic switch was requested
@@ -459,10 +490,11 @@ def prebuffer_worker():
                 stream.close()
             except Exception:
                 pass
+            _reinit_pyaudio()
             try:
                 stream = _open_microphone_stream()
                 if not AUDIO_DEVICE or AUDIO_DEVICE.lower() == "default":
-                    _last_default_idx = _get_default_device_idx()
+                    _last_default_idx = _probe_default_device_index()
                 else:
                     _last_default_idx = None
                 print(f"🎤 Switched to: {get_active_device_name()}")
@@ -476,13 +508,14 @@ def prebuffer_worker():
         if _default_check_counter >= _default_check_interval:
             _default_check_counter = 0
             if (not AUDIO_DEVICE or AUDIO_DEVICE.lower() == "default") and not _recording:
-                new_default = _get_default_device_idx()
+                new_default = _probe_default_device_index()
                 if new_default is not None and new_default != _last_default_idx:
                     try:
                         stream.stop_stream()
                         stream.close()
                     except Exception:
                         pass
+                    _reinit_pyaudio()
                     try:
                         stream = _open_microphone_stream()
                         _last_default_idx = new_default
@@ -503,8 +536,11 @@ def prebuffer_worker():
                 stream.close()
             except Exception:
                 pass
+            _reinit_pyaudio()
             try:
                 stream = _open_microphone_stream()
+                if not AUDIO_DEVICE or AUDIO_DEVICE.lower() == "default":
+                    _last_default_idx = _probe_default_device_index()
             except RuntimeError:
                 print("❌ Mic recovery failed, prebuffer stopping.")
                 return
