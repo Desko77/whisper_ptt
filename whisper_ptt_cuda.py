@@ -381,19 +381,23 @@ def list_audio_devices():
         pa.terminate()
 
 
-def _probe_default_device_index():
-    """Get current system default input device index using a fresh PortAudio scan.
+def _probe_default_device_info():
+    """Get current system default input device (index, name) using a fresh PortAudio scan.
 
     Creates a temporary PyAudio instance to force PortAudio to rescan devices,
     avoiding stale cached device lists that miss hot-plug/unplug events.
-    Returns the device index (int) or None if no input device is available.
+    Returns (index, name) tuple, or (None, None) if no input device is available.
+
+    NOTE: on Windows MME, the default index can be stable (sound mapper) even when
+    the underlying device changes — callers MUST also compare by name.
     """
     pa = None
     try:
         pa = pyaudio.PyAudio()
-        return pa.get_default_input_device_info()["index"]
+        info = pa.get_default_input_device_info()
+        return (info["index"], _fix_device_name(info["name"]))
     except (OSError, KeyError):
-        return None
+        return (None, None)
     finally:
         if pa:
             try:
@@ -431,9 +435,21 @@ def get_active_device_name():
 
 
 def _open_microphone_stream():
-    """Open mic stream, retrying with PyAudio re-init on transient PortAudio errors."""
+    """Open mic stream, retrying with PyAudio re-init on transient PortAudio errors.
+
+    When AUDIO_DEVICE="default", resolves the current system default to an EXPLICIT
+    device index at open time (instead of passing None). This pins the stream to a
+    real physical device so stream.read() will raise OSError reliably if the device
+    disappears — otherwise PortAudio on Windows may silently keep reading zeros.
+    """
     global _pyaudio_instance
     device_index = _resolve_device_index()
+    if device_index is None:
+        # Pin to the current system default explicitly (avoid Windows MME "sound mapper" abstraction).
+        try:
+            device_index = _pyaudio_instance.get_default_input_device_info()["index"]
+        except (OSError, KeyError):
+            device_index = None  # fall back to PortAudio-chosen default
     for attempt in range(1, _MIC_MAX_RETRIES + 1):
         try:
             kwargs = dict(
@@ -445,7 +461,18 @@ def _open_microphone_stream():
             )
             if device_index is not None:
                 kwargs["input_device_index"] = device_index
-            return _pyaudio_instance.open(**kwargs)
+            stream = _pyaudio_instance.open(**kwargs)
+            # Log which physical device was actually opened (helps diagnose Windows MME mapping issues).
+            try:
+                if device_index is not None:
+                    opened_name = _fix_device_name(
+                        _pyaudio_instance.get_device_info_by_index(device_index)["name"]
+                    )
+                    print(f"🎧 Mic stream opened: idx={device_index} name='{opened_name}'")
+                    _logger.info(f"Mic stream opened: idx={device_index} name='{opened_name}'")
+            except Exception:
+                pass
+            return stream
         except OSError as e:
             print(f"⚠️  Mic open failed (attempt {attempt}/{_MIC_MAX_RETRIES}): {e}")
             try:
@@ -454,6 +481,13 @@ def _open_microphone_stream():
                 pass
             time.sleep(_MIC_RETRY_DELAY * attempt)
             _pyaudio_instance = pyaudio.PyAudio()
+            # Re-resolve device index after reinit (default may have finished initializing, e.g. BT).
+            device_index = _resolve_device_index()
+            if device_index is None:
+                try:
+                    device_index = _pyaudio_instance.get_default_input_device_info()["index"]
+                except (OSError, KeyError):
+                    device_index = None
     raise RuntimeError("Could not open microphone after retries - check audio permissions and device.")
 
 
@@ -476,10 +510,12 @@ def prebuffer_worker():
     global _recording, _audio_frames
 
     stream = _open_microphone_stream()
-    # Track default device index for auto-detection of system default changes
+    # Track default device (index, name) for auto-detection of system default changes.
+    # Comparing by name too is critical on Windows MME where the "default" index
+    # can remain stable (sound mapper) even when the underlying physical device changes.
     _default_check_interval = max(1, int(SAMPLE_RATE / CHUNK_SIZE * 2))  # ~every 2 sec
     _default_check_counter = 0
-    _last_default_idx = _probe_default_device_index() if (not AUDIO_DEVICE or AUDIO_DEVICE.lower() == "default") else None
+    _last_default_info = _probe_default_device_info() if (not AUDIO_DEVICE or AUDIO_DEVICE.lower() == "default") else (None, None)
 
     while _prebuffer_running:
         # Check if mic switch was requested
@@ -494,9 +530,9 @@ def prebuffer_worker():
             try:
                 stream = _open_microphone_stream()
                 if not AUDIO_DEVICE or AUDIO_DEVICE.lower() == "default":
-                    _last_default_idx = _probe_default_device_index()
+                    _last_default_info = _probe_default_device_info()
                 else:
-                    _last_default_idx = None
+                    _last_default_info = (None, None)
                 print(f"🎤 Switched to: {get_active_device_name()}")
             except RuntimeError:
                 print("Mic switch failed, prebuffer stopping.")
@@ -508,8 +544,19 @@ def prebuffer_worker():
         if _default_check_counter >= _default_check_interval:
             _default_check_counter = 0
             if (not AUDIO_DEVICE or AUDIO_DEVICE.lower() == "default") and not _recording:
-                new_default = _probe_default_device_index()
-                if new_default is not None and new_default != _last_default_idx:
+                new_info = _probe_default_device_info()
+                new_idx, new_name = new_info
+                last_idx, last_name = _last_default_info
+                # Detect change by EITHER index OR name (Windows MME may keep index stable).
+                changed = (
+                    new_idx is not None
+                    and (new_idx != last_idx or (new_name and new_name != last_name))
+                )
+                if changed:
+                    _logger.info(
+                        f"Default device changed: last=(idx={last_idx}, name='{last_name}') "
+                        f"new=(idx={new_idx}, name='{new_name}')"
+                    )
                     try:
                         stream.stop_stream()
                         stream.close()
@@ -518,7 +565,7 @@ def prebuffer_worker():
                     _reinit_pyaudio()
                     try:
                         stream = _open_microphone_stream()
-                        _last_default_idx = new_default
+                        _last_default_info = new_info
                         dev_name = get_active_device_name()
                         print(f"🎤 Default device changed, switched to: {dev_name}")
                         _logger.info(f"Auto-switched mic to: {dev_name}")
@@ -540,7 +587,7 @@ def prebuffer_worker():
             try:
                 stream = _open_microphone_stream()
                 if not AUDIO_DEVICE or AUDIO_DEVICE.lower() == "default":
-                    _last_default_idx = _probe_default_device_index()
+                    _last_default_info = _probe_default_device_info()
             except RuntimeError:
                 print("❌ Mic recovery failed, prebuffer stopping.")
                 return
