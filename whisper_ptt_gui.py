@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QLabel, QTabWidget, QLineEdit,
     QCheckBox, QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit,
     QPushButton, QGroupBox, QFormLayout, QMessageBox,
+    QRadioButton, QButtonGroup,
 )
 from PySide6.QtGui import QIcon, QPainter, QColor, QPen, QPainterPath, QAction
 from PySide6.QtCore import (
@@ -478,6 +479,7 @@ class SettingsDialog(QDialog):
         self._add_dspin(af, "PADDING_SEC", "Padding (sec):", 0.0, 2.0, 0.1)
         self._add_spin(af, "MIN_FRAMES", "Min frames:", 1, 50, 1)
         self._add_spin(af, "SILENCE_AMPLITUDE", "Silence threshold:", 0, 10000, 50)
+        self._add_prebuffer_mode_controls(af)
         tabs.addTab(audio_tab, "Audio")
 
         # Chunking tab
@@ -521,6 +523,43 @@ class SettingsDialog(QDialog):
         btn_layout.addWidget(apply_btn)
         btn_layout.addWidget(cancel_btn)
         layout.addLayout(btn_layout)
+
+    def _add_prebuffer_mode_controls(self, form):
+        """Radio pair (always / timeout) + idle-timeout spinbox.
+
+        - 'always' = mic stream stays open continuously (zero first-press latency, more battery)
+        - 'timeout' = release mic after N idle seconds; first press after release reopens
+        """
+        container = QWidget()
+        vbox = QVBoxLayout(container)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(2)
+
+        group = QButtonGroup(container)
+        always_radio = QRadioButton("Prebuffer always active (mic stays open)")
+        timeout_radio = QRadioButton("Prebuffer with idle timeout (releases mic when idle)")
+        group.addButton(always_radio, 0)  # id=0 -> "always"
+        group.addButton(timeout_radio, 1)  # id=1 -> "timeout"
+        vbox.addWidget(always_radio)
+        vbox.addWidget(timeout_radio)
+
+        timeout_row = QHBoxLayout()
+        timeout_row.setContentsMargins(20, 0, 0, 0)  # indent under timeout radio
+        timeout_row.addWidget(QLabel("Release mic after"))
+        timeout_spin = QSpinBox()
+        timeout_spin.setRange(1, 86400)        # 1 sec .. 24 h
+        timeout_spin.setSingleStep(60)
+        timeout_spin.setSuffix(" sec")
+        timeout_row.addWidget(timeout_spin)
+        timeout_row.addStretch()
+        vbox.addLayout(timeout_row)
+
+        # Spinbox is meaningful only in 'timeout' mode
+        timeout_radio.toggled.connect(timeout_spin.setEnabled)
+
+        self._widgets["PREBUFFER_MODE"] = group
+        self._widgets["PREBUFFER_IDLE_TIMEOUT_SEC"] = timeout_spin
+        form.addRow("Prebuffer mode:", container)
 
     def _add_mic_combo(self, form):
         w = QComboBox()
@@ -597,7 +636,19 @@ class SettingsDialog(QDialog):
             if key == "AUDIO_DEVICE":
                 continue  # already set in _add_mic_combo
             val = cfg.get(key, "")
-            if isinstance(widget, QCheckBox):
+            if isinstance(widget, QButtonGroup):
+                # PREBUFFER_MODE: "always" -> id 0, "timeout" -> id 1
+                btn_id = 0 if str(val).lower() == "always" else 1
+                btn = widget.button(btn_id)
+                if btn is not None:
+                    btn.setChecked(True)
+                # spinbox enabled state mirrors radio (handled by toggled signal,
+                # but ensure correct initial state for the case when timeout-radio
+                # was already checked before _load_values fires)
+                spin = self._widgets.get("PREBUFFER_IDLE_TIMEOUT_SEC")
+                if spin is not None:
+                    spin.setEnabled(btn_id == 1)
+            elif isinstance(widget, QCheckBox):
                 widget.setChecked(val is True)
             elif isinstance(widget, QComboBox):
                 idx = widget.findText(str(val))
@@ -613,7 +664,10 @@ class SettingsDialog(QDialog):
     def _get_values(self):
         result = {}
         for key, widget in self._widgets.items():
-            if isinstance(widget, QCheckBox):
+            if isinstance(widget, QButtonGroup):
+                # PREBUFFER_MODE: id 0 -> "always", id 1 -> "timeout"
+                result[key] = "always" if widget.checkedId() == 0 else "timeout"
+            elif isinstance(widget, QCheckBox):
                 result[key] = widget.isChecked()
             elif key == "AUDIO_DEVICE":
                 result[key] = widget.currentData() or "default"

@@ -121,6 +121,15 @@ PADDING_SEC = _env("PADDING_SEC", "0.2", type_=float)
 MIN_FRAMES = _env("MIN_FRAMES", "5", type_=int)
 # Simple silence gate: max int16 amplitude below this is treated as silence.
 SILENCE_AMPLITUDE_THRESHOLD = _env("SILENCE_AMPLITUDE", "750", type_=int)
+# Prebuffer mode:
+#   "always"  - mic stream stays open continuously (zero first-press latency, more battery use)
+#   "timeout" - release mic stream after N idle seconds; first press after release reopens the stream
+#               (battery friendly, BT headsets can return to A2DP profile when idle)
+PREBUFFER_MODE = _env("PREBUFFER_MODE", "timeout").strip().lower()
+if PREBUFFER_MODE not in ("always", "timeout"):
+    PREBUFFER_MODE = "timeout"
+# Idle seconds before mic stream is released (only when PREBUFFER_MODE=timeout). Default: 30 min.
+PREBUFFER_IDLE_TIMEOUT_SEC = _env("PREBUFFER_IDLE_TIMEOUT_SEC", "1800", type_=int)
 
 # Chunked transcription for long recordings (0 = disabled)
 CHUNK_DURATION_SEC = _env("CHUNK_DURATION_SEC", "15", type_=float)
@@ -250,6 +259,8 @@ def _prebuffer_size():
 
 _MIC_MAX_RETRIES = 5
 _MIC_RETRY_DELAY = 1.0
+_wake_event = threading.Event()        # PTT press signals worker to wake from SLEEPING
+_last_activity_ts = time.monotonic()   # updated on PTT press; idle timer reference
 
 
 def list_audio_devices():
@@ -409,17 +420,65 @@ def _open_microphone_stream():
 
 
 def prebuffer_worker():
-    """Background thread: read mic into ring buffer; when recording, also append to _audio_frames."""
+    """Background thread: read mic into ring buffer; when recording, also append to _audio_frames.
+
+    Two states:
+    - ACTIVE   : stream is open, ring buffer being filled.
+    - SLEEPING : stream is closed (PREBUFFER_MODE=timeout and idle > timeout).
+                 Worker waits on _wake_event; PTT press wakes it.
+
+    First press after wake-up has no prebuffer pre-roll (deque is empty) and incurs
+    the cold-start latency of opening the mic stream (especially noticeable on BT).
+    """
     global _recording, _audio_frames
 
-    stream = _open_microphone_stream()
-    # Track default device (index, name) — compare by both to be robust against
-    # backends that keep the "default" index stable while the underlying device changes.
+    stream = None
+    _last_default_info = (None, None)
     _default_check_interval = max(1, int(SAMPLE_RATE / CHUNK_SIZE * 2))  # ~every 2 sec
     _default_check_counter = 0
-    _last_default_info = _probe_default_device_info() if (not AUDIO_DEVICE or AUDIO_DEVICE.lower() == "default") else (None, None)
+
+    # Initial open: try to open at startup. If it fails, start in SLEEPING (will retry on first PTT).
+    try:
+        stream = _open_microphone_stream()
+        if not AUDIO_DEVICE or AUDIO_DEVICE.lower() == "default":
+            _last_default_info = _probe_default_device_info()
+    except RuntimeError:
+        print("⚠️  Mic not available at startup — prebuffer SLEEPING until first hotkey press.")
+        _logger.warning("Initial mic open failed; entering SLEEPING state.")
+        stream = None
 
     while _prebuffer_running:
+        # ---- SLEEPING state: wait for wake signal (PTT) or shutdown ----
+        if stream is None:
+            woken = _wake_event.wait(timeout=1.0)
+            if not _prebuffer_running:
+                break
+            # Discard a pending mic switch — stream is closed and AUDIO_DEVICE was
+            # already updated by switch_microphone(); the upcoming open will use it.
+            # Without this, the ACTIVE-state mic-switch handler would double-open.
+            if _mic_switch_event.is_set():
+                _mic_switch_event.clear()
+            if not woken:
+                continue
+            _wake_event.clear()
+            try:
+                stream = _open_microphone_stream()
+                if not AUDIO_DEVICE or AUDIO_DEVICE.lower() == "default":
+                    _last_default_info = _probe_default_device_info()
+                else:
+                    _last_default_info = (None, None)
+                _default_check_counter = 0
+                print("🎤 Mic stream reopened (woken by hotkey)")
+                _logger.info("Prebuffer ACTIVE (woken from SLEEPING)")
+            except RuntimeError:
+                print("❌ Mic wake failed — staying SLEEPING.")
+                _logger.error("Mic wake failed; remaining SLEEPING.")
+                stream = None
+                continue
+            # fall through to ACTIVE-state logic
+
+        # ---- ACTIVE state ----
+
         # Check if mic switch was requested
         if _mic_switch_event.is_set():
             _mic_switch_event.clear()
@@ -515,16 +574,51 @@ def prebuffer_worker():
                     frames_since = len(_audio_frames) - _next_chunk_frame
                     if frames_since >= chunk_threshold:
                         _extract_and_submit_chunk()
-    try:
-        stream.stop_stream()
-        stream.close()
-    except Exception:
-        pass
+
+        # ---- Idle timeout check: ACTIVE -> SLEEPING ----
+        if (PREBUFFER_MODE == "timeout"
+                and not _recording
+                and PREBUFFER_IDLE_TIMEOUT_SEC > 0
+                and (time.monotonic() - _last_activity_ts) > PREBUFFER_IDLE_TIMEOUT_SEC):
+            # Atomic re-check + deque clear under the same lock that start_recording
+            # acquires. If a PTT press raced in, _recording is True and we skip closing;
+            # otherwise we clear the deque so a (very narrowly racing) start_recording
+            # snapshot sees an empty buffer instead of stale audio.
+            with _prebuffer_lock:
+                if _recording or (time.monotonic() - _last_activity_ts) <= PREBUFFER_IDLE_TIMEOUT_SEC:
+                    continue
+                _prebuffer_deque.clear()
+            try:
+                stream.stop_stream()
+                stream.close()
+            except Exception:
+                pass
+            stream = None
+            _last_default_info = (None, None)
+            _default_check_counter = 0
+            # NOTE: do NOT clear _wake_event here — if PTT raced in just now, we want
+            # to wake immediately on next loop iteration.
+            print(f"💤 Mic released after {PREBUFFER_IDLE_TIMEOUT_SEC}s idle (prebuffer SLEEPING)")
+            _logger.info("Prebuffer SLEEPING (idle > %ds)", PREBUFFER_IDLE_TIMEOUT_SEC)
+            _fire_event("prebuffer_sleeping")
+
+    if stream is not None:
+        try:
+            stream.stop_stream()
+            stream.close()
+        except Exception:
+            pass
 
 
 def start_recording():
-    """Start recording: copy prebuffer into _audio_frames; _recording flag lets worker append."""
-    global _recording, _audio_frames
+    """Start recording: copy prebuffer into _audio_frames; _recording flag lets worker append.
+
+    Also resets idle timer and wakes the prebuffer worker if it is SLEEPING
+    (PREBUFFER_MODE=timeout and stream was released after idle timeout).
+    """
+    global _recording, _audio_frames, _last_activity_ts
+    _last_activity_ts = time.monotonic()
+    _wake_event.set()  # no-op if worker is ACTIVE
     with _prebuffer_lock:
         _audio_frames[:] = list(_prebuffer_deque)
     _recording = True
@@ -1096,10 +1190,16 @@ def init_whisper():
 def init_audio():
     """Initialize PyAudio, prebuffer deque, and start prebuffer worker thread."""
     global _pyaudio_instance, _prebuffer_deque, _prebuffer_running, _prebuffer_thread
+    global _last_activity_ts
     _prebuffer_running = True
+    _last_activity_ts = time.monotonic()
+    _wake_event.clear()
     _pyaudio_instance = pyaudio.PyAudio()
     _prebuffer_deque = collections.deque(maxlen=_prebuffer_size())
-    print(f"🎧 Prebuffer active (last {PREBUFFER_SEC}s)")
+    if PREBUFFER_MODE == "timeout":
+        print(f"🎧 Prebuffer active (last {PREBUFFER_SEC}s; releases mic after {PREBUFFER_IDLE_TIMEOUT_SEC}s idle)")
+    else:
+        print(f"🎧 Prebuffer active (last {PREBUFFER_SEC}s; mode=always, mic stays open)")
     _prebuffer_thread = threading.Thread(target=prebuffer_worker, daemon=True)
     _prebuffer_thread.start()
 
@@ -1184,6 +1284,7 @@ def shutdown():
     """Stop prebuffer worker, transcription worker, terminate PyAudio."""
     global _prebuffer_running
     _prebuffer_running = False
+    _wake_event.set()  # break the SLEEPING wait so worker exits promptly
     if _prebuffer_thread and _prebuffer_thread.is_alive():
         _prebuffer_thread.join(timeout=3)
     # Signal transcription worker to stop
@@ -1204,6 +1305,7 @@ def reload_config():
     global COPY_TO_CLIPBOARD, PASTE_TO_ACTIVE_WINDOW
     global CLIPBOARD_AFTER_PASTE_POLICY, KEYS_AFTER_PASTE
     global PREBUFFER_SEC, PADDING_SEC, MIN_FRAMES, SILENCE_AMPLITUDE_THRESHOLD
+    global PREBUFFER_MODE, PREBUFFER_IDLE_TIMEOUT_SEC
     global CHUNK_DURATION_SEC, CHUNK_OVERLAP_SEC
     global SHOW_NOTIFICATIONS, LOG_ENABLED, _log_handler
     global AUDIO_DEVICE
@@ -1236,6 +1338,11 @@ def reload_config():
     PADDING_SEC = _env("PADDING_SEC", "0.2", type_=float)
     MIN_FRAMES = _env("MIN_FRAMES", "5", type_=int)
     SILENCE_AMPLITUDE_THRESHOLD = _env("SILENCE_AMPLITUDE", "750", type_=int)
+    new_prebuffer_mode = _env("PREBUFFER_MODE", "timeout").strip().lower()
+    if new_prebuffer_mode not in ("always", "timeout"):
+        new_prebuffer_mode = "timeout"
+    PREBUFFER_MODE = new_prebuffer_mode
+    PREBUFFER_IDLE_TIMEOUT_SEC = _env("PREBUFFER_IDLE_TIMEOUT_SEC", "1800", type_=int)
     CHUNK_DURATION_SEC = _env("CHUNK_DURATION_SEC", "15", type_=float)
     CHUNK_OVERLAP_SEC = _env("CHUNK_OVERLAP_SEC", "2.0", type_=float)
     AUDIO_DEVICE = _env("AUDIO_DEVICE", "default").strip()
@@ -1279,6 +1386,8 @@ def get_config():
         "PADDING_SEC": PADDING_SEC,
         "MIN_FRAMES": MIN_FRAMES,
         "SILENCE_AMPLITUDE": SILENCE_AMPLITUDE_THRESHOLD,
+        "PREBUFFER_MODE": PREBUFFER_MODE,
+        "PREBUFFER_IDLE_TIMEOUT_SEC": PREBUFFER_IDLE_TIMEOUT_SEC,
         "CHUNK_DURATION_SEC": CHUNK_DURATION_SEC,
         "CHUNK_OVERLAP_SEC": CHUNK_OVERLAP_SEC,
         "AUDIO_DEVICE": AUDIO_DEVICE,
