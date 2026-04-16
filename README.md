@@ -26,7 +26,7 @@ A local LLM (Ollama, LM Studio, or any OpenAI-compatible server) powers both STT
 - **Windows autostart** - launch at login with startup delay for reliable hotkey registration
 - **Single instance** - prevents duplicate processes
 - **Logging** - optional file logging for diagnostics
-- **Microphone selection** - choose input device from GUI (hot-swap without restart), auto-detects system default device changes
+- **Microphone selection** - choose input device from GUI (hot-swap without restart), auto-detects system default device changes, shows active device name in settings and notifications
 - **Fully configurable** - all settings via `.env` file or GUI settings dialog
 
 ---
@@ -121,7 +121,7 @@ The GUI runs as a system tray application with:
 - **Tray icon** - changes color based on state (blue=loading, green=ready, red=recording, orange=processing)
 - **Recording overlay** - translucent waveform indicator, draggable
 - **Settings dialog** - all configuration in one place, organized by category
-- **Notifications** - balloon notifications with transcribed text
+- **Notifications** - balloon notifications with transcribed text and active microphone name
 - **Autostart** - "Start with Windows" option in settings
 - **Re-register hotkeys** - tray menu option if hotkeys stop working
 
@@ -134,7 +134,7 @@ The GUI runs as a system tray application with:
 | ![LLM](docs/images/settings-llm.png) | ![Output](docs/images/settings-output.png) |
 | **LLM** - backend, model, URL, API key | **Output** - clipboard, paste method, keys after paste |
 | ![Audio](docs/images/settings-audio.png) | ![Chunking](docs/images/settings-chunking.png) |
-| **Audio** - microphone, sample rate, chunk size, prebuffer, silence threshold | **Chunking** - chunk duration and overlap for long recordings |
+| **Audio** - microphone, active device display, sample rate, chunk size, prebuffer, silence threshold | **Chunking** - chunk duration and overlap for long recordings |
 | ![General](docs/images/settings-general.png) | |
 | **General** - notifications, logging, autostart | |
 

@@ -581,6 +581,10 @@ class SettingsDialog(QDialog):
                     break
         self._widgets["AUDIO_DEVICE"] = w
         form.addRow("Microphone:", w)
+        # Show resolved physical device name (useful when "Default" is selected)
+        active_label = QLabel(core.get_active_device_name())
+        active_label.setStyleSheet("color: gray; font-style: italic;")
+        form.addRow("Active device:", active_label)
 
     def _add_text(self, form, key, label, password=False):
         w = QLineEdit()
@@ -816,7 +820,9 @@ class WhisperPTTApp:
     def _on_transcription_done(self, text):
         self._set_state("idle")
         if text.strip() and core.SHOW_NOTIFICATIONS:
-            self._tray.showMessage("Whisper PTT", text[:200], QSystemTrayIcon.MessageIcon.Information, 3000)
+            mic = core.get_active_device_name()
+            body = f"[{mic}]\n{text[:200]}"
+            self._tray.showMessage("Whisper PTT", body, QSystemTrayIcon.MessageIcon.Information, 3000)
 
     @Slot(str)
     @Slot(str)
