@@ -94,6 +94,24 @@ LLM_API_KEY = _env("LLM_API_KEY", "")
 # Reasoning/thinking control for models that support it (e.g. Gemma 4).
 # "none" = disable thinking (fast), "low"/"medium"/"high" = enable with budget.
 LLM_REASONING_EFFORT = _env("LLM_REASONING_EFFORT", "none").strip().lower()
+# z.ai thinking parameter: "disabled" | "enabled" | "" (default, not sent).
+# Needed for GLM models on api.z.ai - they think by default unless disabled.
+LLM_THINKING = _env("LLM_THINKING", "").strip().lower()
+# Fallback LLM (used when primary is unreachable / timeouts / 5xx / 429).
+# Applies to openai backend only. Typical use: cloud primary + local LM Studio fallback.
+LLM_FALLBACK_ENABLED = _env("LLM_FALLBACK_ENABLED", "false", type_=bool)
+LLM_FALLBACK_URL = _env("LLM_FALLBACK_URL", "")
+LLM_FALLBACK_MODEL = _env("LLM_FALLBACK_MODEL", "")
+LLM_FALLBACK_API_KEY = _env("LLM_FALLBACK_API_KEY", "")
+LLM_FALLBACK_THINKING = _env("LLM_FALLBACK_THINKING", "").strip().lower()
+# Per-request timeout in seconds (applies to primary and fallback).
+LLM_TIMEOUT = _env("LLM_TIMEOUT", "15", type_=int)
+# After a primary failure, skip primary for this many seconds and go straight
+# to fallback. Avoids paying the primary timeout on every transcription when
+# the cloud is known-down. 0 = always try primary first.
+LLM_FALLBACK_STICKY_SEC = _env("LLM_FALLBACK_STICKY_SEC", "60", type_=int)
+# Replace profanity/obscene language with neutral equivalents in voice-to-text transform
+LLM_CLEAN_PROFANITY = _env("LLM_CLEAN_PROFANITY", "true", type_=bool)
 DEFAULT_LLM_TRANSFORM_PROMPT_RU = """Исправь следующую расшифровку речи. Правила:
 - Исправь пунктуацию, заглавные буквы и явные грамматические ошибки
 - Убери слова-паразиты (эм, ну, типа, вот, короче и т.д.)
@@ -101,7 +119,7 @@ DEFAULT_LLM_TRANSFORM_PROMPT_RU = """Исправь следующую расш�
 - НЕ перефразируй — сохраняй порядок слов и структуру предложения
 - Технические термины, названия и специальную лексику оставляй как есть
 - Пиши ТОЛЬКО на русском языке, НЕ транслитерируй в латиницу
-- Верни ТОЛЬКО исправленный текст, без пояснений
+- Верни ТОЛЬКО исправленный текст, без пояснений{profanity_rule}
 
 Расшифровка: {raw_text}"""
 
@@ -113,7 +131,7 @@ DEFAULT_LLM_TRANSFORM_PROMPT = """Fix the following speech-to-text transcription
 - Keep technical terms, names, and domain-specific vocabulary as-is
 - Keep the original language ({detected_lang}) — do NOT transliterate to Latin script
 - If it's already clean, return as-is
-- Return ONLY the cleaned text, no explanations
+- Return ONLY the cleaned text, no explanations{profanity_rule}
 
 Transcription: {raw_text}"""
 
@@ -140,8 +158,8 @@ SPELLCHECK_LANGUAGE = _env("SPELLCHECK_LANGUAGE", "auto").strip().lower()
 # Replace profanity/obscene language with neutral equivalents
 SPELLCHECK_CLEAN_PROFANITY = _env("SPELLCHECK_CLEAN_PROFANITY", "true", type_=bool)
 
-_PROFANITY_RULE_RU = "\n- Замени обсценную лексику, мат и грубые выражения на нейтральные эквиваленты, сохраняя смысл"
-_PROFANITY_RULE_EN = "\n- Replace profanity, obscene language, and vulgar expressions with neutral equivalents, preserving meaning"
+_PROFANITY_RULE_RU = "\n- ОБЯЗАТЕЛЬНО заменяй обсценную лексику, мат и грубые выражения (уебанство, пиздец, жопа, бля и пр.) на нейтральные аналоги"
+_PROFANITY_RULE_EN = "\n- ALWAYS replace profanity, obscene language, and vulgar expressions (fuck, shit, damn, etc.) with neutral equivalents"
 
 SPELLCHECK_PROMPT_RU = """Исправь следующий текст (язык: {detected_lang}). Правила:
 - Исправь пунктуацию, заглавные буквы и явные грамматические ошибки
@@ -867,22 +885,80 @@ def _llm_request_ollama(prompt):
     return r.json()["response"].strip()
 
 
-def _llm_request_openai(prompt):
-    """Send request to OpenAI-compatible API (LM Studio, llama.cpp, etc.)."""
+class _LLMRetryable(Exception):
+    """Primary endpoint failure that warrants trying the fallback."""
+
+
+_llm_fallback_sticky_until = 0.0  # monotonic timestamp; primary is skipped while now < this
+
+
+def _llm_try_endpoint(url, model, api_key, reasoning_effort, thinking, prompt, timeout):
+    """One attempt against an OpenAI-compatible endpoint. Raises _LLMRetryable
+    for conditions that warrant fallback (network, 5xx, 429, empty response),
+    or raises directly (HTTPError/ValueError) for fatal errors (4xx non-429)."""
     headers = {"Content-Type": "application/json"}
-    if LLM_API_KEY:
-        headers["Authorization"] = f"Bearer {LLM_API_KEY}"
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     body = {
-        "model": LLM_MODEL,
+        "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.1,
         "max_tokens": len(prompt) * 2,
         "stream": False,
     }
-    if LLM_REASONING_EFFORT != "off":
-        body["reasoning_effort"] = LLM_REASONING_EFFORT
-    r = requests.post(LLM_URL, headers=headers, json=body, timeout=30)
-    return r.json()["choices"][0]["message"]["content"].strip()
+    if reasoning_effort and reasoning_effort != "off":
+        body["reasoning_effort"] = reasoning_effort
+    if thinking:
+        body["thinking"] = {"type": thinking}
+    try:
+        r = requests.post(url, headers=headers, json=body, timeout=timeout)
+    except (requests.ConnectionError, requests.Timeout) as e:
+        raise _LLMRetryable(f"{type(e).__name__}: {e}")
+    if r.status_code in (429, 500, 502, 503, 504):
+        raise _LLMRetryable(f"HTTP {r.status_code}")
+    r.raise_for_status()  # other 4xx = fatal (bad request / bad model / bad key)
+    data = r.json()
+    msg = data["choices"][0]["message"]
+    content = (msg.get("content") or "").strip()
+    if not content:
+        # Some providers put the answer into reasoning_content when thinking was
+        # active and ran out of max_tokens before content. Accept it.
+        content = (msg.get("reasoning_content") or "").strip()
+    if not content:
+        raise _LLMRetryable("empty response")
+    return content
+
+
+def _llm_request_openai(prompt):
+    """Route an OpenAI-compatible request with optional fallback endpoint."""
+    global _llm_fallback_sticky_until
+    has_fallback = bool(LLM_FALLBACK_ENABLED and LLM_FALLBACK_URL and LLM_FALLBACK_MODEL)
+    now = time.monotonic()
+
+    if has_fallback and now < _llm_fallback_sticky_until:
+        print(f"🔁 LLM fallback (sticky) → {LLM_FALLBACK_MODEL}")
+        return _llm_try_endpoint(
+            LLM_FALLBACK_URL, LLM_FALLBACK_MODEL, LLM_FALLBACK_API_KEY,
+            "", LLM_FALLBACK_THINKING, prompt, LLM_TIMEOUT,
+        )
+
+    try:
+        return _llm_try_endpoint(
+            LLM_URL, LLM_MODEL, LLM_API_KEY,
+            LLM_REASONING_EFFORT, LLM_THINKING, prompt, LLM_TIMEOUT,
+        )
+    except _LLMRetryable as e:
+        if not has_fallback:
+            raise RuntimeError(f"LLM primary failed: {e}")
+        print(f"⚠ LLM primary failed ({e}), falling back to {LLM_FALLBACK_MODEL}")
+        _llm_fallback_sticky_until = now + LLM_FALLBACK_STICKY_SEC
+        try:
+            return _llm_try_endpoint(
+                LLM_FALLBACK_URL, LLM_FALLBACK_MODEL, LLM_FALLBACK_API_KEY,
+                "", LLM_FALLBACK_THINKING, prompt, LLM_TIMEOUT,
+            )
+        except Exception as fb_err:
+            raise RuntimeError(f"LLM primary AND fallback failed. primary={e}; fallback={fb_err}")
 
 
 def transform_with_llm(raw_text, detected_lang):
@@ -891,7 +967,14 @@ def transform_with_llm(raw_text, detected_lang):
         return raw_text
     print(f"🔄 LLM transform ({LLM_BACKEND})...")
     t0 = time.time()
-    prompt = LLM_TRANSFORM_PROMPT.format(detected_lang=detected_lang, raw_text=raw_text)
+    if LLM_CLEAN_PROFANITY:
+        prof_rule = _PROFANITY_RULE_RU if (detected_lang or "").startswith("ru") else _PROFANITY_RULE_EN
+    else:
+        prof_rule = ""
+    kwargs = {"detected_lang": detected_lang, "raw_text": raw_text}
+    if "{profanity_rule}" in LLM_TRANSFORM_PROMPT:
+        kwargs["profanity_rule"] = prof_rule
+    prompt = LLM_TRANSFORM_PROMPT.format(**kwargs)
     try:
         if LLM_BACKEND == "openai":
             result = _llm_request_openai(prompt)
@@ -1674,7 +1757,10 @@ def reload_config():
     """Re-read .env and update module globals. Returns dict of changed keys.
     Some settings require restart: WHISPER_MODEL (model reload), SAMPLE_RATE/CHUNK_SIZE (audio restart)."""
     global WHISPER_LANGUAGE, WHISPER_INITIAL_PROMPT
-    global USE_LLM_TRANSFORM, LLM_BACKEND, LLM_MODEL, LLM_URL, LLM_API_KEY, LLM_REASONING_EFFORT, LLM_TRANSFORM_PROMPT
+    global USE_LLM_TRANSFORM, LLM_BACKEND, LLM_MODEL, LLM_URL, LLM_API_KEY, LLM_REASONING_EFFORT, LLM_THINKING
+    global LLM_FALLBACK_ENABLED, LLM_FALLBACK_URL, LLM_FALLBACK_MODEL, LLM_FALLBACK_API_KEY, LLM_FALLBACK_THINKING
+    global LLM_TIMEOUT, LLM_FALLBACK_STICKY_SEC
+    global LLM_CLEAN_PROFANITY, LLM_TRANSFORM_PROMPT
     global COPY_TO_CLIPBOARD, PASTE_TO_ACTIVE_WINDOW, PASTE_METHOD
     global CLIPBOARD_AFTER_PASTE_POLICY, KEYS_AFTER_PASTE
     global PREBUFFER_SEC, PADDING_SEC, MIN_FRAMES, SILENCE_AMPLITUDE_THRESHOLD
@@ -1705,6 +1791,15 @@ def reload_config():
         else "http://localhost:1234/v1/chat/completions"))
     LLM_API_KEY = _env("LLM_API_KEY", "")
     LLM_REASONING_EFFORT = _env("LLM_REASONING_EFFORT", "none").strip().lower()
+    LLM_THINKING = _env("LLM_THINKING", "").strip().lower()
+    LLM_FALLBACK_ENABLED = _env("LLM_FALLBACK_ENABLED", "false", type_=bool)
+    LLM_FALLBACK_URL = _env("LLM_FALLBACK_URL", "")
+    LLM_FALLBACK_MODEL = _env("LLM_FALLBACK_MODEL", "")
+    LLM_FALLBACK_API_KEY = _env("LLM_FALLBACK_API_KEY", "")
+    LLM_FALLBACK_THINKING = _env("LLM_FALLBACK_THINKING", "").strip().lower()
+    LLM_TIMEOUT = _env("LLM_TIMEOUT", "15", type_=int)
+    LLM_FALLBACK_STICKY_SEC = _env("LLM_FALLBACK_STICKY_SEC", "60", type_=int)
+    LLM_CLEAN_PROFANITY = _env("LLM_CLEAN_PROFANITY", "true", type_=bool)
     LLM_TRANSFORM_PROMPT = _get_llm_prompt()
     COPY_TO_CLIPBOARD = _env("COPY_TO_CLIPBOARD", "true", type_=bool)
     PASTE_TO_ACTIVE_WINDOW = _env("PASTE_TO_ACTIVE_WINDOW", "true", type_=bool)
@@ -1771,6 +1866,15 @@ def get_config():
         "LLM_URL": LLM_URL,
         "LLM_API_KEY": LLM_API_KEY,
         "LLM_REASONING_EFFORT": LLM_REASONING_EFFORT,
+        "LLM_THINKING": LLM_THINKING,
+        "LLM_FALLBACK_ENABLED": LLM_FALLBACK_ENABLED,
+        "LLM_FALLBACK_URL": LLM_FALLBACK_URL,
+        "LLM_FALLBACK_MODEL": LLM_FALLBACK_MODEL,
+        "LLM_FALLBACK_API_KEY": LLM_FALLBACK_API_KEY,
+        "LLM_FALLBACK_THINKING": LLM_FALLBACK_THINKING,
+        "LLM_TIMEOUT": LLM_TIMEOUT,
+        "LLM_FALLBACK_STICKY_SEC": LLM_FALLBACK_STICKY_SEC,
+        "LLM_CLEAN_PROFANITY": LLM_CLEAN_PROFANITY,
         "COPY_TO_CLIPBOARD": COPY_TO_CLIPBOARD,
         "PASTE_TO_ACTIVE_WINDOW": PASTE_TO_ACTIVE_WINDOW,
         "PASTE_METHOD": PASTE_METHOD,
