@@ -112,6 +112,9 @@ LLM_TIMEOUT = _env("LLM_TIMEOUT", "15", type_=int)
 LLM_FALLBACK_STICKY_SEC = _env("LLM_FALLBACK_STICKY_SEC", "60", type_=int)
 # Replace profanity/obscene language with neutral equivalents in voice-to-text transform
 LLM_CLEAN_PROFANITY = _env("LLM_CLEAN_PROFANITY", "true", type_=bool)
+# Replace typographic AI-symbols in LLM output with plain ASCII equivalents
+# (em/en dash -> '-', curly quotes -> straight, ellipsis -> '...', ё -> е, nbsp -> space)
+LLM_STRIP_AI_SYMBOLS = _env("LLM_STRIP_AI_SYMBOLS", "true", type_=bool)
 DEFAULT_LLM_TRANSFORM_PROMPT_RU = """Исправь следующую расшифровку речи. Правила:
 - Исправь пунктуацию, заглавные буквы и явные грамматические ошибки
 - Убери слова-паразиты (эм, ну, типа, вот, короче и т.д.)
@@ -980,6 +983,8 @@ def transform_with_llm(raw_text, detected_lang):
             result = _llm_request_openai(prompt)
         else:
             result = _llm_request_ollama(prompt)
+        if LLM_STRIP_AI_SYMBOLS:
+            result = _strip_ai_symbols(result)
         elapsed = time.time() - t0
         print(f"✨ LLM ({elapsed:.1f}s): {result}")
         _logger.info("LLM %s %.1fs: %s", LLM_BACKEND, elapsed, result)
@@ -1524,6 +1529,43 @@ def _clean_llm_response(text):
     return result
 
 
+_AI_SYMBOL_MAP = str.maketrans({
+    "—": "-",     # — em dash
+    "–": "-",     # – en dash
+    "−": "-",     # − minus sign
+    "‐": "-",     # ‐ hyphen
+    "‑": "-",     # ‑ non-breaking hyphen
+    "…": "...",   # … horizontal ellipsis
+    "“": '"',     # " left double quote
+    "”": '"',     # " right double quote
+    "„": '"',     # „ low double quote
+    "‟": '"',     # ‟ high reversed double quote
+    "‘": "'",     # ' left single quote
+    "’": "'",     # ' right single quote
+    "‚": "'",     # ‚ low single quote
+    "‛": "'",     # ‛ high reversed single quote
+    " ": " ",     #   no-break space
+    " ": " ",     #   narrow no-break space
+    " ": " ",     #   thin space
+    " ": " ",     #   figure space
+    " ": " ",     #   punctuation space
+    " ": " ",     #   hair space
+    "​": "",      # zero-width space
+    "‌": "",      # zero-width non-joiner
+    "‍": "",      # zero-width joiner
+    "﻿": "",      # zero-width no-break space (BOM)
+    "ё": "е",
+    "Ё": "Е",
+})
+
+
+def _strip_ai_symbols(text):
+    """Replace typographic AI-symbols with plain ASCII equivalents."""
+    if not text:
+        return text
+    return text.translate(_AI_SYMBOL_MAP)
+
+
 def _spellcheck_process():
     """SpellCheck pipeline: capture selected text -> LLM fix -> paste back."""
     if not _spellcheck_lock.acquire(blocking=False):
@@ -1584,6 +1626,8 @@ def _spellcheck_process():
             else:
                 result = _llm_request_ollama(prompt)
             result = _clean_llm_response(result)
+            if LLM_STRIP_AI_SYMBOLS:
+                result = _strip_ai_symbols(result)
             elapsed = time.time() - t0
             print(f"SpellCheck: LLM ({elapsed:.1f}s): {result[:120]}")
             _logger.info("SpellCheck LLM %.1fs: %s", elapsed, result[:120])
@@ -1760,7 +1804,7 @@ def reload_config():
     global USE_LLM_TRANSFORM, LLM_BACKEND, LLM_MODEL, LLM_URL, LLM_API_KEY, LLM_REASONING_EFFORT, LLM_THINKING
     global LLM_FALLBACK_ENABLED, LLM_FALLBACK_URL, LLM_FALLBACK_MODEL, LLM_FALLBACK_API_KEY, LLM_FALLBACK_THINKING
     global LLM_TIMEOUT, LLM_FALLBACK_STICKY_SEC
-    global LLM_CLEAN_PROFANITY, LLM_TRANSFORM_PROMPT
+    global LLM_CLEAN_PROFANITY, LLM_STRIP_AI_SYMBOLS, LLM_TRANSFORM_PROMPT
     global COPY_TO_CLIPBOARD, PASTE_TO_ACTIVE_WINDOW, PASTE_METHOD
     global CLIPBOARD_AFTER_PASTE_POLICY, KEYS_AFTER_PASTE
     global PREBUFFER_SEC, PADDING_SEC, MIN_FRAMES, SILENCE_AMPLITUDE_THRESHOLD
@@ -1800,6 +1844,7 @@ def reload_config():
     LLM_TIMEOUT = _env("LLM_TIMEOUT", "15", type_=int)
     LLM_FALLBACK_STICKY_SEC = _env("LLM_FALLBACK_STICKY_SEC", "60", type_=int)
     LLM_CLEAN_PROFANITY = _env("LLM_CLEAN_PROFANITY", "true", type_=bool)
+    LLM_STRIP_AI_SYMBOLS = _env("LLM_STRIP_AI_SYMBOLS", "true", type_=bool)
     LLM_TRANSFORM_PROMPT = _get_llm_prompt()
     COPY_TO_CLIPBOARD = _env("COPY_TO_CLIPBOARD", "true", type_=bool)
     PASTE_TO_ACTIVE_WINDOW = _env("PASTE_TO_ACTIVE_WINDOW", "true", type_=bool)
@@ -1875,6 +1920,7 @@ def get_config():
         "LLM_TIMEOUT": LLM_TIMEOUT,
         "LLM_FALLBACK_STICKY_SEC": LLM_FALLBACK_STICKY_SEC,
         "LLM_CLEAN_PROFANITY": LLM_CLEAN_PROFANITY,
+        "LLM_STRIP_AI_SYMBOLS": LLM_STRIP_AI_SYMBOLS,
         "COPY_TO_CLIPBOARD": COPY_TO_CLIPBOARD,
         "PASTE_TO_ACTIVE_WINDOW": PASTE_TO_ACTIVE_WINDOW,
         "PASTE_METHOD": PASTE_METHOD,

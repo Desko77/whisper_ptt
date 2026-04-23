@@ -175,6 +175,7 @@ All settings are read from `WHISPER_PTT_*` environment variables, a `.env` file,
 | `WHISPER_PTT_WHISPER_INITIAL_PROMPT` | Whisper initial prompt (language hint) | `English speech.` |
 | `WHISPER_PTT_LLM_API_KEY` | API key for OpenAI-compatible servers (if required) | - |
 | `WHISPER_PTT_LLM_TRANSFORM_PROMPT` | Custom LLM prompt (`{detected_lang}`, `{raw_text}` placeholders) | built-in |
+| `WHISPER_PTT_LLM_STRIP_AI_SYMBOLS` | Replace typographic AI-symbols in LLM output with plain ASCII (em/en dash -> `-`, curly quotes -> straight, ellipsis -> `...`, `ё` -> `е`, nbsp -> space). Russian guillemets `«»` are preserved. | `true` |
 | `WHISPER_PTT_SAMPLE_RATE` | Audio sample rate (Hz) | `16000` |
 | `WHISPER_PTT_CHUNK_SIZE` | Audio chunk size | `1024` |
 | `WHISPER_PTT_PREBUFFER_SEC` | Prebuffer duration (captures the first word) | `0.5` |

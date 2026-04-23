@@ -82,6 +82,9 @@ LLM_URL = _env("LLM_URL", _env("OLLAMA_URL",
     "http://localhost:11434/api/generate" if LLM_BACKEND == "ollama"
     else "http://localhost:1234/v1/chat/completions"))
 LLM_API_KEY = _env("LLM_API_KEY", "")
+# Replace typographic AI-symbols in LLM output with plain ASCII equivalents
+# (em/en dash -> '-', curly quotes -> straight, ellipsis -> '...', ё -> е, nbsp -> space)
+LLM_STRIP_AI_SYMBOLS = _env("LLM_STRIP_AI_SYMBOLS", "true", type_=bool)
 DEFAULT_LLM_TRANSFORM_PROMPT = """Fix the following speech-to-text transcription. Rules:
 - Fix punctuation, capitalization, and obvious grammar errors
 - Remove filler words (um, uh, like, etc.)
@@ -782,6 +785,43 @@ def _llm_request_openai(prompt):
     return r.json()["choices"][0]["message"]["content"].strip()
 
 
+_AI_SYMBOL_MAP = str.maketrans({
+    "—": "-",     # — em dash
+    "–": "-",     # – en dash
+    "−": "-",     # − minus sign
+    "‐": "-",     # ‐ hyphen
+    "‑": "-",     # ‑ non-breaking hyphen
+    "…": "...",   # … horizontal ellipsis
+    "“": '"',     # " left double quote
+    "”": '"',     # " right double quote
+    "„": '"',     # „ low double quote
+    "‟": '"',     # ‟ high reversed double quote
+    "‘": "'",     # ' left single quote
+    "’": "'",     # ' right single quote
+    "‚": "'",     # ‚ low single quote
+    "‛": "'",     # ‛ high reversed single quote
+    " ": " ",     #   no-break space
+    " ": " ",     #   narrow no-break space
+    " ": " ",     #   thin space
+    " ": " ",     #   figure space
+    " ": " ",     #   punctuation space
+    " ": " ",     #   hair space
+    "​": "",      # zero-width space
+    "‌": "",      # zero-width non-joiner
+    "‍": "",      # zero-width joiner
+    "﻿": "",      # zero-width no-break space (BOM)
+    "ё": "е",
+    "Ё": "Е",
+})
+
+
+def _strip_ai_symbols(text):
+    """Replace typographic AI-symbols with plain ASCII equivalents."""
+    if not text:
+        return text
+    return text.translate(_AI_SYMBOL_MAP)
+
+
 def transform_with_llm(raw_text, detected_lang):
     """LLM transform: post-process transcription via configured backend."""
     if not raw_text.strip():
@@ -794,6 +834,8 @@ def transform_with_llm(raw_text, detected_lang):
             result = _llm_request_openai(prompt)
         else:
             result = _llm_request_ollama(prompt)
+        if LLM_STRIP_AI_SYMBOLS:
+            result = _strip_ai_symbols(result)
         elapsed = time.time() - t0
         print(f"✨ LLM ({elapsed:.1f}s): {result}")
         _logger.info("LLM %s %.1fs: %s", LLM_BACKEND, elapsed, result)
@@ -1301,7 +1343,7 @@ def shutdown():
 def reload_config():
     """Re-read .env and update module globals. Returns dict of changed keys."""
     global WHISPER_LANGUAGE, WHISPER_INITIAL_PROMPT
-    global USE_LLM_TRANSFORM, LLM_BACKEND, LLM_MODEL, LLM_URL, LLM_API_KEY, LLM_TRANSFORM_PROMPT
+    global USE_LLM_TRANSFORM, LLM_BACKEND, LLM_MODEL, LLM_URL, LLM_API_KEY, LLM_STRIP_AI_SYMBOLS, LLM_TRANSFORM_PROMPT
     global COPY_TO_CLIPBOARD, PASTE_TO_ACTIVE_WINDOW
     global CLIPBOARD_AFTER_PASTE_POLICY, KEYS_AFTER_PASTE
     global PREBUFFER_SEC, PADDING_SEC, MIN_FRAMES, SILENCE_AMPLITUDE_THRESHOLD
@@ -1327,6 +1369,7 @@ def reload_config():
         "http://localhost:11434/api/generate" if LLM_BACKEND == "ollama"
         else "http://localhost:1234/v1/chat/completions"))
     LLM_API_KEY = _env("LLM_API_KEY", "")
+    LLM_STRIP_AI_SYMBOLS = _env("LLM_STRIP_AI_SYMBOLS", "true", type_=bool)
     LLM_TRANSFORM_PROMPT = _env("LLM_TRANSFORM_PROMPT", DEFAULT_LLM_TRANSFORM_PROMPT)
     COPY_TO_CLIPBOARD = _env("COPY_TO_CLIPBOARD", "true", type_=bool)
     PASTE_TO_ACTIVE_WINDOW = _env("PASTE_TO_ACTIVE_WINDOW", "true", type_=bool)
@@ -1376,6 +1419,7 @@ def get_config():
         "LLM_MODEL": LLM_MODEL,
         "LLM_URL": LLM_URL,
         "LLM_API_KEY": LLM_API_KEY,
+        "LLM_STRIP_AI_SYMBOLS": LLM_STRIP_AI_SYMBOLS,
         "COPY_TO_CLIPBOARD": COPY_TO_CLIPBOARD,
         "PASTE_TO_ACTIVE_WINDOW": PASTE_TO_ACTIVE_WINDOW,
         "CLIPBOARD_AFTER_PASTE_POLICY": CLIPBOARD_AFTER_PASTE_POLICY,
