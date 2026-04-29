@@ -1574,8 +1574,18 @@ def _spellcheck_process():
     try:
         _fire_event("spellcheck_started")
 
-        # Wait for modifier keys to be released (from hotkey)
-        time.sleep(0.3)
+        # Wait for hotkey modifiers to be physically released before sending Ctrl+C
+        # (uses Win32 GetAsyncKeyState directly, does not touch keyboard hooks).
+        try:
+            _get_state = ctypes.windll.user32.GetAsyncKeyState
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                if not any(_get_state(vk) & 0x8000 for vk in _ALL_MODIFIERS):
+                    break
+                time.sleep(0.02)
+        except Exception:
+            time.sleep(0.3)
+        _release_stuck_modifiers()
 
         # Save clipboard and capture selected text
         saved_clipboard = _save_clipboard()
@@ -1583,15 +1593,17 @@ def _spellcheck_process():
 
         _send_copy()
 
-        # Poll clipboard for changes
+        # Poll clipboard for changes (up to ~2s for slow apps)
         new_text = old_text
-        for i in range(20):
+        for i in range(40):
             time.sleep(0.05)
             new_text = _get_clipboard_text()
             if new_text != old_text:
                 break
 
         if new_text == old_text or not new_text.strip():
+            _logger.info("SpellCheck capture failed: clipboard unchanged (old=%r, len=%d)",
+                         (old_text or "")[:60], len(old_text or ""))
             print("SpellCheck: no text selected")
             _restore_clipboard(saved_clipboard)
             _fire_event("spellcheck_done", {"text": "", "changed": False})
@@ -1673,15 +1685,18 @@ def _spellcheck_process():
 
 def _on_spellcheck_key(_event=None):
     """SpellCheck hotkey handler (on key press). Checks modifier and spawns processing."""
-    if not SPELLCHECK_ENABLED or _recording:
-        return
-    if SPELLCHECK_MODIFIER is not None and not keyboard.is_pressed(SPELLCHECK_MODIFIER):
-        return
-    # SpellCheck does not need the mic but counts as activity (resets prebuffer idle timer).
-    # Don't wake the worker — SpellCheck processes selected text via LLM, not audio.
-    global _last_activity_ts
-    _last_activity_ts = time.monotonic()
-    threading.Thread(target=_spellcheck_process, daemon=True).start()
+    try:
+        if not SPELLCHECK_ENABLED or _recording:
+            return
+        if SPELLCHECK_MODIFIER is not None and not keyboard.is_pressed(SPELLCHECK_MODIFIER):
+            return
+        # SpellCheck does not need the mic but counts as activity (resets prebuffer idle timer).
+        # Don't wake the worker — SpellCheck processes selected text via LLM, not audio.
+        global _last_activity_ts
+        _last_activity_ts = time.monotonic()
+        threading.Thread(target=_spellcheck_process, daemon=True).start()
+    except Exception as e:
+        _logger.error("SpellCheck hotkey handler error: %s", e, exc_info=True)
 
 
 # -----------------------------------------------------------------------------
