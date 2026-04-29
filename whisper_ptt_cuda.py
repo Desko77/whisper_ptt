@@ -242,6 +242,11 @@ if PREBUFFER_MODE not in ("always", "timeout"):
     PREBUFFER_MODE = "timeout"
 # Idle seconds before mic stream is released (only when PREBUFFER_MODE=timeout). Default: 30 min.
 PREBUFFER_IDLE_TIMEOUT_SEC = _env("PREBUFFER_IDLE_TIMEOUT_SEC", "1800", type_=int)
+# Sleep only for Bluetooth microphones. For wired/USB mics, holding the stream open
+# is essentially free, so the idle release just adds cold-start latency for nothing.
+# When True (default): timeout mode only releases the stream if the active device
+# looks like a Bluetooth headset. When False: release applies to any device.
+PREBUFFER_BT_ONLY = _env("PREBUFFER_BT_ONLY", "true", type_=bool)
 
 # Chunked transcription for long recordings (0 = disabled)
 CHUNK_DURATION_SEC = _env("CHUNK_DURATION_SEC", "15", type_=float)
@@ -448,6 +453,31 @@ def _resolve_device_index():
             return dev["index"]
     print(f"⚠️  Audio device '{AUDIO_DEVICE}' not found, using system default.")
     return None
+
+
+_BT_DEVICE_MARKERS = (
+    "bluetooth",
+    "hands-free",
+    "hands free",
+    "ag audio",
+    "airpods",
+    "freebuds",
+    "wireless",
+)
+
+
+def _is_bluetooth_device(name):
+    """Heuristic: does this device name look like a Bluetooth microphone?
+
+    Detects HFP/HSP profile names ('Hands-Free', 'AG Audio'), explicit 'Bluetooth'
+    in the device label, and well-known wireless headset families (AirPods, FreeBuds).
+    Wired headsets ('Microphone (Realtek...)', 'Plantronics 3200 Headset') are NOT
+    matched - generic terms like 'Headset' alone are too ambiguous.
+    """
+    if not name:
+        return False
+    lowered = name.lower()
+    return any(marker in lowered for marker in _BT_DEVICE_MARKERS)
 
 
 def get_active_device_name():
@@ -695,9 +725,13 @@ def prebuffer_worker():
                         _extract_and_submit_chunk()
 
         # ---- Idle timeout check: ACTIVE -> SLEEPING ----
+        # When PREBUFFER_BT_ONLY is on, skip release for non-Bluetooth devices —
+        # holding the stream open on wired/USB mics is essentially free, and the
+        # cold-start delay on first PTT press would be paid for no benefit.
         if (PREBUFFER_MODE == "timeout"
                 and not _recording
                 and PREBUFFER_IDLE_TIMEOUT_SEC > 0
+                and (not PREBUFFER_BT_ONLY or _is_bluetooth_device(get_active_device_name()))
                 and (time.monotonic() - _last_activity_ts) > PREBUFFER_IDLE_TIMEOUT_SEC):
             # Atomic re-check + deque clear under the same lock that start_recording
             # acquires. If a PTT press raced in, _recording is True and we skip closing;
@@ -1853,7 +1887,7 @@ def reload_config():
     global COPY_TO_CLIPBOARD, PASTE_TO_ACTIVE_WINDOW, PASTE_METHOD
     global CLIPBOARD_AFTER_PASTE_POLICY, KEYS_AFTER_PASTE
     global PREBUFFER_SEC, PADDING_SEC, MIN_FRAMES, SILENCE_AMPLITUDE_THRESHOLD
-    global PREBUFFER_MODE, PREBUFFER_IDLE_TIMEOUT_SEC
+    global PREBUFFER_MODE, PREBUFFER_IDLE_TIMEOUT_SEC, PREBUFFER_BT_ONLY
     global CHUNK_DURATION_SEC, CHUNK_OVERLAP_SEC
     global SHOW_NOTIFICATIONS, LOG_ENABLED, _log_handler
     global AUDIO_DEVICE
@@ -1907,6 +1941,7 @@ def reload_config():
         new_prebuffer_mode = "timeout"
     PREBUFFER_MODE = new_prebuffer_mode
     PREBUFFER_IDLE_TIMEOUT_SEC = _env("PREBUFFER_IDLE_TIMEOUT_SEC", "1800", type_=int)
+    PREBUFFER_BT_ONLY = _env("PREBUFFER_BT_ONLY", "true", type_=bool)
     CHUNK_DURATION_SEC = _env("CHUNK_DURATION_SEC", "15", type_=float)
     CHUNK_OVERLAP_SEC = _env("CHUNK_OVERLAP_SEC", "2.0", type_=float)
     AUDIO_DEVICE = _env("AUDIO_DEVICE", "default").strip()
@@ -1979,6 +2014,7 @@ def get_config():
         "SILENCE_AMPLITUDE": SILENCE_AMPLITUDE_THRESHOLD,
         "PREBUFFER_MODE": PREBUFFER_MODE,
         "PREBUFFER_IDLE_TIMEOUT_SEC": PREBUFFER_IDLE_TIMEOUT_SEC,
+        "PREBUFFER_BT_ONLY": PREBUFFER_BT_ONLY,
         "CHUNK_DURATION_SEC": CHUNK_DURATION_SEC,
         "CHUNK_OVERLAP_SEC": CHUNK_OVERLAP_SEC,
         "AUDIO_DEVICE": AUDIO_DEVICE,

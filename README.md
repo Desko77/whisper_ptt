@@ -182,6 +182,9 @@ All settings are read from `WHISPER_PTT_*` environment variables, a `.env` file,
 | `WHISPER_PTT_PADDING_SEC` | Silence padding before transcription | `0.2` |
 | `WHISPER_PTT_MIN_FRAMES` | Min frames to process (skip accidental taps) | `5` |
 | `WHISPER_PTT_SILENCE_AMPLITUDE` | Amplitude below which audio is treated as silence | `750` |
+| `WHISPER_PTT_PREBUFFER_MODE` | Mic stream lifecycle: `always` (open continuously) or `timeout` (release after idle) | `timeout` |
+| `WHISPER_PTT_PREBUFFER_IDLE_TIMEOUT_SEC` | Idle seconds before stream is released (only when `PREBUFFER_MODE=timeout`) | `1800` |
+| `WHISPER_PTT_PREBUFFER_BT_ONLY` | Release stream only on Bluetooth devices (lets BT headsets return to A2DP). Wired/USB mics gain nothing from release, only cold-start cost. | `true` |
 | `WHISPER_PTT_LOG_ENABLED` | Enable file logging | `false` |
 | `WHISPER_PTT_LOG_FILE` | Log file path | `whisper_ptt.log` |
 | `WHISPER_PTT_SHOW_NOTIFICATIONS` | Show balloon notifications | `true` |

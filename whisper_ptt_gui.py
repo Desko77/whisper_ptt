@@ -525,10 +525,12 @@ class SettingsDialog(QDialog):
         layout.addLayout(btn_layout)
 
     def _add_prebuffer_mode_controls(self, form):
-        """Radio pair (always / timeout) + idle-timeout spinbox.
+        """Radio pair (always / timeout) + idle-timeout spinbox + BT-only checkbox.
 
         - 'always' = mic stream stays open continuously (zero first-press latency, more battery)
         - 'timeout' = release mic after N idle seconds; first press after release reopens
+        - 'BT only' = in timeout mode, only release the stream on Bluetooth devices
+          (wired/USB mics gain nothing from release, only cold-start latency)
         """
         container = QWidget()
         vbox = QVBoxLayout(container)
@@ -554,11 +556,20 @@ class SettingsDialog(QDialog):
         timeout_row.addStretch()
         vbox.addLayout(timeout_row)
 
-        # Spinbox is meaningful only in 'timeout' mode
+        bt_only_row = QHBoxLayout()
+        bt_only_row.setContentsMargins(20, 0, 0, 0)  # indent under timeout radio
+        bt_only_check = QCheckBox("Only for Bluetooth microphones")
+        bt_only_row.addWidget(bt_only_check)
+        bt_only_row.addStretch()
+        vbox.addLayout(bt_only_row)
+
+        # Spinbox + BT-only checkbox are meaningful only in 'timeout' mode
         timeout_radio.toggled.connect(timeout_spin.setEnabled)
+        timeout_radio.toggled.connect(bt_only_check.setEnabled)
 
         self._widgets["PREBUFFER_MODE"] = group
         self._widgets["PREBUFFER_IDLE_TIMEOUT_SEC"] = timeout_spin
+        self._widgets["PREBUFFER_BT_ONLY"] = bt_only_check
         form.addRow("Prebuffer mode:", container)
 
     def _add_mic_combo(self, form):
@@ -646,12 +657,15 @@ class SettingsDialog(QDialog):
                 btn = widget.button(btn_id)
                 if btn is not None:
                     btn.setChecked(True)
-                # spinbox enabled state mirrors radio (handled by toggled signal,
-                # but ensure correct initial state for the case when timeout-radio
-                # was already checked before _load_values fires)
+                # spinbox + BT-only checkbox enabled state mirror radio (handled by
+                # toggled signal, but ensure correct initial state for the case when
+                # timeout-radio was already checked before _load_values fires)
                 spin = self._widgets.get("PREBUFFER_IDLE_TIMEOUT_SEC")
                 if spin is not None:
                     spin.setEnabled(btn_id == 1)
+                bt_only = self._widgets.get("PREBUFFER_BT_ONLY")
+                if bt_only is not None:
+                    bt_only.setEnabled(btn_id == 1)
             elif isinstance(widget, QCheckBox):
                 widget.setChecked(val is True)
             elif isinstance(widget, QComboBox):
