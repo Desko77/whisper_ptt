@@ -1780,14 +1780,44 @@ def switch_microphone(device_name=None):
     _mic_switch_event.set()
 
 
+# Hardware scan codes for OEM punctuation (US ANSI). keyboard.on_press_key("/")
+# resolves the name through the active keyboard layout, so on non-US layouts
+# (RU etc.) the hook silently binds to the wrong physical key or to nothing.
+# Passing the scan code directly binds to the physical key regardless of layout.
+_OEM_SCAN_CODES = {
+    "/": 0x35, "?": 0x35,
+    ".": 0x34, ">": 0x34,
+    ",": 0x33, "<": 0x33,
+    ";": 0x27, ":": 0x27,
+    "'": 0x28, '"': 0x28,
+    "[": 0x1A, "{": 0x1A,
+    "]": 0x1B, "}": 0x1B,
+    "\\": 0x2B, "|": 0x2B,
+    "`": 0x29, "~": 0x29,
+    "-": 0x0C, "_": 0x0C,
+    "=": 0x0D, "+": 0x0D,
+}
+
+
+def _resolve_hotkey_target(key_name):
+    """Return scan code for OEM punctuation keys, original name otherwise."""
+    if isinstance(key_name, str) and key_name in _OEM_SCAN_CODES:
+        return _OEM_SCAN_CODES[key_name]
+    return key_name
+
+
 def register_hotkeys():
     """Register keyboard hotkey hooks for push-to-talk and spellcheck."""
     _suppress = HOTKEY_KEY in ("alt", "pause")
-    keyboard.on_press_key(HOTKEY_KEY, _on_hotkey_press, suppress=_suppress)
-    keyboard.on_release_key(HOTKEY_KEY, _on_hotkey_release, suppress=_suppress)
+    ptt_target = _resolve_hotkey_target(HOTKEY_KEY)
+    keyboard.on_press_key(ptt_target, _on_hotkey_press, suppress=_suppress)
+    keyboard.on_release_key(ptt_target, _on_hotkey_release, suppress=_suppress)
     # SpellCheck hotkey (same pattern as PTT: on_press_key + modifier check)
     if SPELLCHECK_ENABLED:
-        keyboard.on_press_key(SPELLCHECK_KEY, _on_spellcheck_key, suppress=False)
+        sc_target = _resolve_hotkey_target(SPELLCHECK_KEY)
+        keyboard.on_press_key(sc_target, _on_spellcheck_key, suppress=False)
+        if isinstance(sc_target, int):
+            print(f"SpellCheck: bound to scan code 0x{sc_target:02X} for '{SPELLCHECK_KEY}' (layout-independent)")
 
 
 def unregister_hotkeys():
