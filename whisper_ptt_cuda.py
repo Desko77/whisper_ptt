@@ -1421,6 +1421,30 @@ _CF_UNICODETEXT = 13
 _spellcheck_lock = threading.Lock()
 
 
+def _open_clipboard_with_retry(retries=10, delay=0.03):
+    """OpenClipboard with retry: other apps (clipboard managers, antivirus, Electron)
+    briefly hold the clipboard and return ERROR_ACCESS_DENIED on the first attempt."""
+    last = None
+    for _ in range(retries):
+        try:
+            win32clipboard.OpenClipboard()
+            return True
+        except Exception as e:
+            last = e
+            time.sleep(delay)
+    _logger.debug("OpenClipboard failed after %d retries: %s", retries, last)
+    return False
+
+
+def _clipboard_sequence_number():
+    """Win32 clipboard sequence counter; increments on every write to the clipboard,
+    even when the new content equals the previous one."""
+    try:
+        return int(ctypes.windll.user32.GetClipboardSequenceNumber())
+    except Exception:
+        return 0
+
+
 def _detect_language(text):
     """Detect language from text using Unicode character ranges."""
     if SPELLCHECK_LANGUAGE != "auto":
@@ -1447,8 +1471,9 @@ def _save_clipboard():
         text = pyperclip.paste() or ""
         return [(_CF_UNICODETEXT, text.encode("utf-16-le"))]
     saved = []
+    if not _open_clipboard_with_retry():
+        return saved
     try:
-        win32clipboard.OpenClipboard()
         fmt = 0
         while True:
             fmt = win32clipboard.EnumClipboardFormats(fmt)
@@ -1463,9 +1488,7 @@ def _save_clipboard():
                 saved.append((fmt, data))
             except Exception:
                 continue
-        win32clipboard.CloseClipboard()
-    except Exception as e:
-        _logger.debug("Failed to save clipboard: %s", e)
+    finally:
         try:
             win32clipboard.CloseClipboard()
         except Exception:
@@ -1483,8 +1506,10 @@ def _restore_clipboard(saved):
                 pyperclip.copy(data.decode("utf-16-le"))
                 return
         return
+    if not _open_clipboard_with_retry():
+        _logger.debug("Failed to restore clipboard: OpenClipboard timed out")
+        return
     try:
-        win32clipboard.OpenClipboard()
         win32clipboard.EmptyClipboard()
         for fmt, data in saved:
             try:
@@ -1494,9 +1519,7 @@ def _restore_clipboard(saved):
                     win32clipboard.SetClipboardData(fmt, data)
             except Exception:
                 continue
-        win32clipboard.CloseClipboard()
-    except Exception as e:
-        _logger.debug("Failed to restore clipboard: %s", e)
+    finally:
         try:
             win32clipboard.CloseClipboard()
         except Exception:
@@ -1506,33 +1529,32 @@ def _restore_clipboard(saved):
 def _get_clipboard_text():
     """Get current clipboard text via win32clipboard or pyperclip."""
     if _HAS_WIN32:
+        if not _open_clipboard_with_retry():
+            return ""
         try:
-            win32clipboard.OpenClipboard()
             try:
                 text = win32clipboard.GetClipboardData(_CF_UNICODETEXT)
             except Exception:
                 text = ""
-            win32clipboard.CloseClipboard()
             return text or ""
-        except Exception:
+        finally:
             try:
                 win32clipboard.CloseClipboard()
             except Exception:
                 pass
-            return ""
     return pyperclip.paste() or ""
 
 
 def _set_clipboard_text(text):
     """Set clipboard to plain text via win32clipboard or pyperclip."""
-    if _HAS_WIN32:
+    if _HAS_WIN32 and _open_clipboard_with_retry():
         try:
-            win32clipboard.OpenClipboard()
             win32clipboard.EmptyClipboard()
             win32clipboard.SetClipboardData(_CF_UNICODETEXT, text)
-            win32clipboard.CloseClipboard()
             return
         except Exception:
+            pass
+        finally:
             try:
                 win32clipboard.CloseClipboard()
             except Exception:
@@ -1621,24 +1643,36 @@ def _spellcheck_process():
             time.sleep(0.3)
         _release_stuck_modifiers()
 
-        # Save clipboard and capture selected text
+        # Save clipboard and capture selected text. Detect Ctrl+C effect via the
+        # Win32 clipboard sequence number, not by comparing content — re-selecting
+        # the same text we already have in the clipboard would otherwise look like
+        # "Ctrl+C did nothing".
         saved_clipboard = _save_clipboard()
-        old_text = _get_clipboard_text()
+        seq_before = _clipboard_sequence_number()
 
         _send_copy()
 
-        # Poll clipboard for changes (up to ~2s for slow apps)
-        new_text = old_text
-        for i in range(40):
+        # Poll for the sequence number to advance (up to ~2s for slow apps).
+        seq_after = seq_before
+        for _ in range(40):
             time.sleep(0.05)
-            new_text = _get_clipboard_text()
-            if new_text != old_text:
+            seq_after = _clipboard_sequence_number()
+            if seq_after != seq_before:
                 break
 
-        if new_text == old_text or not new_text.strip():
-            _logger.info("SpellCheck capture failed: clipboard unchanged (old=%r, len=%d)",
-                         (old_text or "")[:60], len(old_text or ""))
+        if seq_after == seq_before:
+            _logger.info("SpellCheck capture failed: clipboard not modified by Ctrl+C (seq=%d)",
+                         seq_before)
             print("SpellCheck: no text selected")
+            _restore_clipboard(saved_clipboard)
+            _fire_event("spellcheck_done", {"text": "", "changed": False})
+            return
+
+        new_text = _get_clipboard_text()
+        if not new_text or not new_text.strip():
+            _logger.info("SpellCheck capture failed: empty selection (seq %d->%d)",
+                         seq_before, seq_after)
+            print("SpellCheck: empty selection")
             _restore_clipboard(saved_clipboard)
             _fire_event("spellcheck_done", {"text": "", "changed": False})
             return
